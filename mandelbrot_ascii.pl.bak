@@ -87,7 +87,6 @@ my($pseudographicAlphebetA) = " ░▒▓█";
 my($mandelbrotInteriorCharacterA) = "☰";
 my($pseudographicAlphebetB) = "▀";
 my($ANSIControlSequenceIntroducer) = "\e[";
-my($TAB) = "\t";
 my($parameters) = {};
 
 # Routine to perform terminal cleanup before ending program,
@@ -98,10 +97,10 @@ sub end
   system("stty echo"); # Begin allow echoing input to the screen again
   CORE::say
   ( 'Last viewed arguments, suitable for replay:'
-  , $TAB, $parameters->{viewPortCenterX}
-  , $TAB, $parameters->{viewPortCenterY}
-  , $TAB, $parameters->{viewPortHeight}
-  , $TAB, $parameters->{maximumIterations}
+  , ' ', $parameters->{viewPortCenterX}
+  , ' ', $parameters->{viewPortCenterY}
+  , ' ', $parameters->{viewPortHeight}
+  , ' ', $parameters->{maximumIterations}
   );
   exit;
 }

@@ -37,7 +37,8 @@
 # // is reached. No plans for flexibility on the escape radius just yet.
 # ALSO: the special code of 320 bits set aka 40 x 0xFF bytes means "flush".
 # `mandelbrot_point` will probably buffer requests into a cacheline of memory,
-# before it slurps them in for processing. That implies a buffer timeout,
+# before it slurps them in for processing. Blocking until either
+# it judges that its seen enough input, or it sees a flush.
 # so "flush" clarifies that caller isn't expecting
 # to feed more data in any time soon.
 #---------
@@ -70,6 +71,7 @@
 #   Caller can unambiguously test this with "is MaximumIterations==0?"
 # * input:MaximumIterations==0 should throw an exception
 #   eg the other non-index fields like XYcurrent also get zeroed in output.
+# * For the lazy, STDERR will also have content in it in this situation.
 # * Caller must feed in uint32 values, but these values' high bits must be clear,
 #   for the goal of maintaining perfect congruence to non-negative signed 32 bit integers.
 #   Otherwise input is invalid, and we must receive an exception.
@@ -79,7 +81,7 @@
 # * Fuzz: VCoISN output:alreadyDoneIterarions > output:MaximumIterations
 # * Fuzz: VCoISN output:alreadyDoneIterarions < input:alreadyDoneIterarions
 # * A SINGLE, valid, trivial (eg abs(XYcurrent)>=2.00) job added to an empty queue
-#   followed by stalling the input should NOT return faster than MIN_TIMEOUT_DURATION.
+#   followed by stalling the input should stall for at least MIN_TIMEOUT_DURATION.
 #   This helps to encourage batching of jobs
 # * The same should be tested (one by one) with a small selection of known-fast inputs.
 #   Known-fast means known to be calculable (either run out of maximumiterations
@@ -91,17 +93,41 @@
 
 use strict;
 use warnings;
+# I cannot easily support "binary data" and UTF-8 at the same time.
+# So, I'll force my own sense of text encoding to be 7-bit ASCII only,
+# while binary segments of strings get to be 8-bit and not reliably
+# iterpreted as string characters at all.
+use bytes;
+
 # use diagnostics -verbose;
 use Data::Dumper;
 use JSON;
 use POSIX qw(floor mkfifo);
-use constant { TRUE => 1, FALSE => 0, MAX_31_BIT_INTEGER => 0x7FFFFFFF };
+use constant
+{ TRUE => 1
+, FALSE => 0
+, MAX_31_BIT_INTEGER => 0x7FFFFFFF
+, ESCAPE_SQUARED => 4
+, JOB_KEY_BYTE_SIZE => 16
+, FLOAT64_BYTE_SIZE => 8
+, PACK_JOB_BYTES => 40
+, PACK_JOB_FORMAT => 'ddddNN'
+, PACK_KEY_FORMAT => 'dd'
+, XSTART_INDEX => 0
+, YSTART_INDEX => 1
+, XCURRENT_INDEX => 2
+, YCURRENT_INDEX => 3
+, CURRENT_ITERATION_INDEX => 4
+, MAXIMUM_ITERATION_INDEX => 5
+, FLUSH_CODE => pack('C*', @{[(255) x 40]})
+};
 use IO::Select;
 use IO::Handle;
 die unless STDIN->blocking(0); # Turn off input buffering
 $|++; # Turn off output buffering
 binmode(STDIN);
 binmode(STDOUT);
+binmode(STDERR);
 
 my($input, $output);
 my($INPUT_LENGTH_IN_BYTES) = my($OUTPUT_LENGTH_IN_BYTES) = 40;
@@ -121,12 +147,54 @@ while($select->can_read())
   die("Sysread says that we read $lengthRead bytes, but I'm only seeing ". length($input) ." bytes in the buffer. $! $@")
     unless(length($input) == $lengthRead);
 
+  if($input eq FLUSH_CODE)
+  { print FLUSH_CODE;
+    next;
+  }
+  my($jobKey) = substr($input, 0, JOB_KEY_BYTE_SIZE); # this is Xstart and Ystart in packed form
+#CORE::say STDERR $jobKey, encode_json(['input', unpack('H*', $input), [unpack(PACK_KEY_FORMAT, $input)], 'jobKey', unpack('H*', $jobKey), [unpack(PACK_KEY_FORMAT, $jobKey)]]);
   my($Xstart, $Ystart, $Xcurrent, $Ycurrent, $currentIterations, $maximumIterations)
-  = unpack("ddddNN", $input);
+  = unpack(PACK_JOB_FORMAT, $input);
 
-  $softError ||= myAssertSoft($currentIterations <= MAX_31_BIT_INTEGER, "CurrentIterations must have high bit unset");
-  $softError ||= myAssertSoft($maximumIterations <= MAX_31_BIT_INTEGER, "MaximumIterations must have high bit unset");
-  $softError ||= myAssertSoft($maximumIterations <0, "MaximumIterations must be larger than zero");
+  eval
+  { myAssertSoft
+      ( $jobKey
+      , $currentIterations <= MAX_31_BIT_INTEGER
+      , "CurrentIterations must have high bit unset"
+      );
+
+    myAssertSoft
+      ( $jobKey
+      , $maximumIterations <= MAX_31_BIT_INTEGER
+      , "MaximumIterations must have high bit unset"
+      );
+
+    myAssertSoft
+      ( $jobKey
+      , $maximumIterations > 0
+      , "MaximumIterations must be larger than zero"
+      );
+
+    myAssertSoft
+      ( $jobKey
+      , $maximumIterations >= $currentIterations
+      , "MaximumIterations must be greater than or equal to CurrentIterations"
+      );
+  };
+  # die($@);
+  $softError = !!($@ =~ /Soft Assertion Failure/);
+
+  until
+  ( $softError
+  ||$currentIterations>=$maximumIterations
+  ||$Xcurrent*$Xcurrent + $Ycurrent*$Ycurrent > ESCAPE_SQUARED
+  )
+  { $currentIterations++;
+    my $tempY = $Ycurrent*$Ycurrent;
+    my $tempX = $Xcurrent*$Xcurrent - $tempY + $Xstart;
+    $Ycurrent = 2 * $Xcurrent * $Ycurrent + $Ystart;
+    $Xcurrent = $tempX;
+  }
 
   output
   ( $softError
@@ -141,48 +209,24 @@ sub output
   if($softError) # bad?
   { $_[2] = $_[3] = $_[4] = $_[5] = 0;
   }
-  print pack('ddddNN', @_);
+  print pack(PACK_JOB_FORMAT, @_);
 }
 
 sub myAssertSoft
-{ my($test, $message) = @_;
+{ my($jobKey, $test, $message) = @_;
   if(!$test)
-  { CORE::say STDERR $message;
+  { CORE::say STDERR $jobKey, $message;
+    die('Soft Assertion Failure');
   }
 }  
 
 sub myAssertFatal
-{ my($test, $message) = @_;
+{ my($jobKey, $test, $message) = @_;
   if(!$test)
-  { CORE::say STDERR $message;
+  { myAssertSoft($jobKey, FALSE, $message);
     exit 1;
   }
 }  
-
-=pod
-my($startX, $startY) = "TODO: initialize this shiz";
-my($currentX, $currentY) = ($startX, $startY);
-my $iterations = 1; # since currentYX are not /supposed to/ reach startXY until iteration #1
-while
-( $iterations < $parameters->{maximumIterations}
-&&$currentX*$currentX + $currentY*$currentY < 4
-)
-{ $iterations++;
-  my $tempY = $currentY*$currentY;
-  my $tempX = $currentX*$currentX - $tempY + $startX;
-  $currentY = 2 * $currentX * $currentY + $startY;
-  $currentX = $tempX;
-}
-# This is a quick trick to make "maxint" results reset to zero,
-# without changing any other valid output values.
-$iterations %= $parameters->{maximumIterations};
-$samples[$index] = $iterations;
-
-=cut
-
-#############
-# MATH DONE #
-#############
 
 # input: anonymous function and a hash reference
 # A new hash reference with the same keys is created,

@@ -429,7 +429,8 @@ sub printCellB
       $cellValue =
         abs($cellValue)<1e-6
         ? 0
-        : log($cellValue+3)/log(3.333);
+        # : log($cellValue+3)/log(3.33333);
+        : ($cellValue+3) ** 0.2;
 
       $cellValue = $cellValue - floor($cellValue);
 

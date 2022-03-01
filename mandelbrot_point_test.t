@@ -79,22 +79,24 @@ feedChild
 );
 
 # Value tests
+die("Current status: I need to figure out how to test one value, and wait for a timeout w/o performing a flush. The 'feedchild()' structure seems to make assumptions which preclude that option, so I'll need to do some rethinking there.");
+
 feedChild
 ( [ 'Value 1'
   , [-.1, -.9, 0, 0, 0, 1]
   , [-.1, -.9, -.1, -.9, 1, 1]
   ]
 , [ 'Value 2'
-  , [-.1, -.9, -.1, -.9, 0, 1]
-  , [-.1, -.9, -.9, -.72, 1, 1]
+  , [.1, -.1, 0, 0, 0, 2]
+  , [.1, -.1, .1, -.12, 2, 2]
   ]
 , [ 'Value 3'
-  , [-.1, -.9, -.9, -.72, 0, 1]
-  , [-.1, -.9, .1916, 0.396, 1, 1]
+  , [.25, .16, 0, 0, 0, 2]
+  , [.25, .16, .2869, 0.24, 2, 2]
   ]
 , [ 'Value 4'
-  , [-.1, -.9, .1916, 0.396, 0, 1]
-  , [-.1, -.9, -.22010544, -.7482528, 1, 1]
+  , [.68, .2, 0, 0, 0, 4]
+  , [.68, .2, 1.67250176, 1.2406656, 3, 4]
   ]
 , [ 'Value 5'
   , [-.1, -.8, 1.42, 1.42, 0, 1] # Should just barely have already escaped,
@@ -186,6 +188,9 @@ sub lopKey
 sub feedChild
 { my $tests = {};
   my $numberOfJobs = scalar(@_);
+
+  $childOutput = $childError = '';
+
   while(my $test = shift)
   { my $label = shift @$test;
     my $input = shift @$test;
@@ -203,12 +208,19 @@ sub feedChild
     
 # CORE::say encode_json(['key', [unpack(PACK_KEY_FORMAT, $inputKey)], 'label', $label, 'input', $input]);
 
-    $childOutput = $childError = '';
     $childInput = pack(PACK_JOB_FORMAT, @$input);
-  
-    $childProcess->pump();
+
+# CORE::say encode_json(['input before single input', length $childInput, $childInput]);
+# CORE::say encode_json(['output before single input', length $childOutput, $childOutput]);
+    $childProcess->pump() while length $childInput;
+# CORE::say encode_json(['input after single input', length $childInput, $childInput]);
+# CORE::say encode_json(['output after single input', length $childOutput, $childOutput]);
   }
+# CORE::say encode_json(['input before flush', length $childInput, $childInput]);
+# CORE::say encode_json(['output before flush', length $childOutput, $childOutput]);
   flush();
+# CORE::say encode_json(['input after flush', length $childInput, $childInput]);
+# die(Dumper($childOutput, length $childOutput)) if $debug;
 
   while(my $outputPacked = substr($childOutput, 0, PACK_JOB_BYTES) )
   { $childOutput = substr($childOutput, PACK_JOB_BYTES);
@@ -263,7 +275,7 @@ sub feedChild
     ( $test->{output}
     , $test->{expectedOutput}
     , 'Value check for `'. $test->{label} .'`'
-    );
+    ) || diag Dumper($test);
     
     if($test->{error} ne '') # Any reported error on STDERR..
     { is

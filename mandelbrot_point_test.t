@@ -43,7 +43,8 @@ binmode(STDOUT);
 binmode(STDERR);
 
 
-my(@executableToTest) = qw(./mandelbrot_point_stub.pl);
+# my(@executableToTest) = qw(./mandelbrot_point_stub.pl);
+my(@executableToTest) = qw(./mandelbrot_point.elf64);
 # my(@executableToTest) = qw(sed s/e/@/g);
 
 my($childInput, $childOutput, $childError, $timer, $childProcess);
@@ -140,7 +141,9 @@ sub flush
   { 
 # die(encode_json({childOutput => $childOutput, childError => $childError, is => $childOutput =~ /FLUSH_CODE/}))
 #   if(length($childOutput) + length($childError));
+print STDERR '[flush pump';
     eval { $childProcess->pump(); };
+CORE::say STDERR ']';
   }
 }
 
@@ -212,7 +215,9 @@ sub feedChild
 
 # CORE::say encode_json(['input before single input', length $childInput, $childInput]);
 # CORE::say encode_json(['output before single input', length $childOutput, $childOutput]);
+print STDERR '[feedChild pump';
     $childProcess->pump() while length $childInput;
+CORE::say STDERR ']';
 # CORE::say encode_json(['input after single input', length $childInput, $childInput]);
 # CORE::say encode_json(['output after single input', length $childOutput, $childOutput]);
   }

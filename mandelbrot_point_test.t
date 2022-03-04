@@ -12,7 +12,7 @@ use constant
 { FALSE => 0
 , TRUE => 1
 , PACK_JOB_BYTES => 40
-, PACK_JOB_FORMAT => 'ddddNN'
+, PACK_JOB_FORMAT => 'ddddVV'
 , PACK_KEY_FORMAT => 'dd'
 , XSTART_INDEX => 0
 , YSTART_INDEX => 1
@@ -27,6 +27,7 @@ use constant
 };
 use Data::Dumper;
 use JSON;
+use Digest::CRC qw(crc64);
 use List::Util qw(min max);
 use POSIX qw(floor ceil round);
 use Test::More;
@@ -137,13 +138,14 @@ sub spawn
 # This forces child to process all pending inputs
 sub flush
 { $childInput = FLUSH_CODE;
-  until(!!(substr($childOutput, -PACK_JOB_BYTES) eq FLUSH_CODE))
+my $retries = 2;
+  until($retries-- < 1 || !!(substr($childOutput, -PACK_JOB_BYTES) eq FLUSH_CODE))
   { 
 # die(encode_json({childOutput => $childOutput, childError => $childError, is => $childOutput =~ /FLUSH_CODE/}))
 #   if(length($childOutput) + length($childError));
-print STDERR '[flush pump';
+print '[flush pump';
     eval { $childProcess->pump(); };
-CORE::say STDERR ']';
+CORE::say ']';
   }
 }
 
@@ -209,7 +211,7 @@ sub feedChild
     , error => '' # default in case nothing gets received later
     };
     
-# CORE::say encode_json(['key', [unpack(PACK_KEY_FORMAT, $inputKey)], 'label', $label, 'input', $input]);
+CORE::say encode_json(['input', $input, 'key', [unpack(PACK_KEY_FORMAT, $inputKey)], 'label', $label]);
 
     $childInput = pack(PACK_JOB_FORMAT, @$input);
 
@@ -219,7 +221,7 @@ print STDERR '[feedChild pump';
     $childProcess->pump() while length $childInput;
 CORE::say STDERR ']';
 # CORE::say encode_json(['input after single input', length $childInput, $childInput]);
-# CORE::say encode_json(['output after single input', length $childOutput, $childOutput]);
+CORE::say encode_json(['output after single input', length $childOutput, $childOutput]);
   }
 # CORE::say encode_json(['input before flush', length $childInput, $childInput]);
 # CORE::say encode_json(['output before flush', length $childOutput, $childOutput]);
@@ -228,7 +230,9 @@ CORE::say STDERR ']';
 # die(Dumper($childOutput, length $childOutput)) if $debug;
 
   while(my $outputPacked = substr($childOutput, 0, PACK_JOB_BYTES) )
-  { $childOutput = substr($childOutput, PACK_JOB_BYTES);
+  { 
+# die(encode_json(['uh.. wha?', $childOutput, $outputPacked, , !!$outputPacked]));
+    $childOutput = substr($childOutput, PACK_JOB_BYTES);
     
     next if $outputPacked eq FLUSH_CODE;
     my $output = [unpack(PACK_JOB_FORMAT, $outputPacked)];
@@ -239,11 +243,14 @@ CORE::say STDERR ']';
     { die
       ( 'Test harness failure, got output'
       , encode_json($output)
+      , encode_json([unpack("H*", $outputPacked)])
       , 'matching no input ever fed in.'
+      , Dumper($tests)
       );
     }
     $tests->{$outputKey}{output} = $output;
   }
+# die(encode_json(['Well, at least we didn\'t try to process that nonsense. 😝', Dumper($tests)]));
 
   while(length $childError)
   { # regex matches and lops off everything up until
@@ -268,6 +275,8 @@ CORE::say STDERR ']';
 
   foreach my $jobKey (keys %$tests)
   { my $test = $tests->{$jobKey};
+
+CORE::say STDERR encode_json([$test->{error}, $test->{expectedSTDERROutput}, crc64($test->{error}), crc64($test->{expectedSTDERROutput})]);
 
     is
     ( $test->{error}

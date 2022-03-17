@@ -80,6 +80,9 @@ _lookForFlushCode:
   # last of all outputting a flush code of our own.
   jz _output # If strings are identical, treat this as a flush code.
 
+
+
+/*
 _checkAssertions:
   leaq CurrentIterations(%rip), %rax # address where both Uint31 "iterations" values are stored, one after the other.
   movq (%rax), %rax # Load both Uint31 values into one 64-bit register
@@ -91,6 +94,7 @@ _checkAssertions:
   rorq $32, %rax # swap CurrentIterations into LSDW
   testl $HIGH_32_BIT_MASK, %eax # Does LSDW have high bit set?
   jnz CurrentIterationsMustHaveHighBitUnset
+*/
 
 _output:
   //// Write 40 bytes from readWriteBuffer into STDOUT
@@ -164,12 +168,4 @@ flushCode:
   .fill 40,1,0xFF
 // messageBuffer:
 //   .skip 256
-// StringMustHaveHighBitUnset:
-//   .string " must have high bit unset"
-// StringMustBeLargerThanZero:
-//   .string " must be larger than zero"
-// StringMaximumIterations:
-//   .string "MaximumIterations"
-// StringCurrentIterations:
-//   .string "CurrentIterations"
 

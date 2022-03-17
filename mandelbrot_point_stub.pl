@@ -111,7 +111,7 @@ use constant
 , JOB_KEY_BYTE_SIZE => 16
 , FLOAT64_BYTE_SIZE => 8
 , PACK_JOB_BYTES => 40
-, PACK_JOB_FORMAT => 'ddddNN'
+, PACK_JOB_FORMAT => 'ddddVV'
 , PACK_KEY_FORMAT => 'dd'
 , XSTART_INDEX => 0
 , YSTART_INDEX => 1
@@ -175,15 +175,19 @@ while($select->can_read())
       , "MaximumIterations must be larger than zero"
       );
 
+=pod
     myAssertSoft
       ( $jobKey
       , $maximumIterations >= $currentIterations
       , "MaximumIterations must be greater than or equal to CurrentIterations"
       );
+=cut
+
   };
   # die($@);
   $softError = !!($@ =~ /Soft Assertion Failure/);
 
+=pod
   until
   ( $softError
   ||$currentIterations>=$maximumIterations
@@ -195,6 +199,7 @@ while($select->can_read())
     $Ycurrent = 2 * $Xcurrent * $Ycurrent + $Ystart;
     $Xcurrent = $tempX;
   }
+=cut
 
   output
   ( $softError

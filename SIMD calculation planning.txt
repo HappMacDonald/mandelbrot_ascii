@@ -1,0 +1,53 @@
+Register use and operation order for Mandelbrot calc
+
+Perl code:
+
+  until
+  ( $currentIterations>=$maximumIterations
+  ||$Xcurrent*$Xcurrent + $Ycurrent*$Ycurrent > ESCAPE_SQUARED
+  )
+  { $currentIterations++;
+    my $tempY = $Ycurrent*$Ycurrent;
+    my $tempX = $Xcurrent*$Xcurrent - $tempY + $Xstart;
+    $Ycurrent = 2 * $Xcurrent * $Ycurrent + $Ystart;
+    $Xcurrent = $tempX;
+  }
+
+== 2022-03-05 Newest realization:
+* Caller WILL have to arrange memory for SIMD consumption after all.
+-- The caller being slower than the inner loop isn't the problem: NEVER EVER EVER housekeep during the inner loop, it's code smell.
+-- Instead the right time to organize data is at creation, so that it *never* has to be "moved" into position.. by caller or by anyone else.
+-- Similar to immutability principles, it needs to be created in its final position. aka "zero-copy".
+* That means no more flush codes, just null prepped memory buffers.
+-- We design the system so that null entries fall through the seive with the least effort, causing the least (ideally no) impact upon output results.
+-- I think in this case null can still be indicated by all 0xFF bytes, though. For XYstart that maps to NaN,Nan which is appropriate, and for CurrentIterations and MaximumIterations it still maps to their being equal, which is all that the inner loop needs to know that it needs to skip it.
+-- So I think I should dedicate XMM15 to all bits set. I've disassembled -O3 memset and learned that the following code should get the job done quickest:
+
+// Set xmm15 to all ones. This inks up the stamp, which you won't have
+// to do again until all the ink is gone
+// eg, past any boundary where xmm15 might get clobbered.
+// pcmpeqd means "Packed CoMPare for EQuality (.. d?)"
+// your register is _count primatives each _bits long.
+// This instruction compares vertically between the two arguments.
+// For every "matching" element between them
+// , it sets (src? dest? I can't tell yet..) to _bits 0s if those elements
+// do not match, and _bits 1s if they do.
+// Since src and dest arguments are the same register invoked twice,
+// all _count of the _bits long elements are guaranteed to match.
+// Thus the result (put in src or in dest.. both the same to this hack)
+// is guaranteed to be _count iterations of _bits 1 bits. EG: all ones.
+pcmpeqd	%xmm15, %xmm15
+
+// This unrolled block of code is what memset recommends, so is probably
+// an optimal shape. memset recommended movups
+// , but I can get away with movaps due to my alignment discipline.
+movaps %xmm15, (%RegisterWithDestAddress)
+movaps %xmm15, 16(%RegisterWithDestAddress)
+movaps %xmm15, 32(%RegisterWithDestAddress)
+...
+movaps %xmm15, 112(%RegisterWithDestAddress)
+
+
+* SSE4.2 support for Double precision floats (float64) means virtually nothing but SSE2 instructions, so I can maintain my focus there.
+SSE has a lanewidth of 2, but I want my code to treat "2" like a configurable integer parameter instead of treating it structurally like Z/2Z. That way later improvements to AVX/2/512 etc need to do little more than increase the lane size to be ready to roll.
+* I'll require caller pre-querying engine about how many lanes to buffer, as I can either get that from CPUid in the engine, or hard-code a given engine.. but since the caller does neither of those, I still need a single source of truth.

@@ -62,8 +62,8 @@ binmode(STDOUT);
 binmode(STDERR);
 
 
-my(@executableToTest) = qw(./mandelbrot_point_stub.pl);
-# my(@executableToTest) = qw(./mandelbrot_point.elf64);
+# my(@executableToTest) = qw(./mandelbrot_point_stub.pl);
+my(@executableToTest) = qw(./mandelbrot_point.elf64);
 # my(@executableToTest) = qw(sed s/e/@/g);
 
 my($childInput, $childOutput, $childError, $timer, $childProcess);
@@ -82,8 +82,8 @@ my($ACTIVE_LANES) = getLanes();
 
 die
 ( "Received this from engine instead of lanes data:"
-. unpack("H*", $childOutput)
-. " Child reported error: $childError"
+. '('. unpack("H*", $childOutput) .')'
+. " Child reported error:($childError)"
 )
 unless
 ( defined($ACTIVE_LANES)

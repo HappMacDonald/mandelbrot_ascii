@@ -15,20 +15,20 @@
 
 # Definitions
 
-JOBLENGTH = 40 # perl pack syntax 'ddddVV'
-PREFIXLENGTH = 16 # perl pack syntax 'dd'
+JOBLENGTH = 80 # perl pack syntax 'ddddddddVVVV'
 XMMBYTESIZE = 16
-OFFSET_XSTART = 0
-OFFSET_YSTART = 8
-OFFSET_XCURRENT = 16
-OFFSET_YCURRENT = 24
-OFFSET_CURRENTITERATIONS = 32
-OFFSET_MAXIMUMITERATIONS = 36
-HIGH_32_BIT_MASK = 0x80000000
+// OFFSET_XSTART = 0
+// OFFSET_YSTART = 8
+// OFFSET_XCURRENT = 16
+// OFFSET_YCURRENT = 24
+// OFFSET_CURRENTITERATIONS = 32
+// OFFSET_MAXIMUMITERATIONS = 36
+// HIGH_32_BIT_MASK = 0x80000000
 
 
 # Macros
 
+/*
 // Clobbers child-owned values
 .macro softError message:req
   // Print the prefix for the error
@@ -51,39 +51,38 @@ softErrorEnd\@:
   movhps      %xmm0, (%rax)
   jmp _output
 .endm
+*/
 
 .text
 _start:
-  //// Read 40 bytes from STDIN into readWriteBuffer
-  // leaq readWriteBuffer(%rip), %rdi # Store memory location into arg1
-  // mov $JOBLENGTH, %rsi # move length into arg2
-  // mov $STDIN, %rdx # define recently vacated arg3
-  // call getMemoryProcedure
-  getMemoryMacro messageLocation=readWriteBuffer(%rip),length=$JOBLENGTH
-  // mov %rax, %rbx # Store successfully read byte count in a parent-owned register
+  // On startup, report number of lanes that this engine supports.
+  putMemoryMacro messageLocation=numberOfLanesToReport(%rip),length=$4
 
-_checkInputLength:
+  // Read first job pallet
+  getMemoryMacro messageLocation=readWriteBuffer(%rip),length=$JOBLENGTH
+
+checkInputLength:
   mov %rax, %rdi # Store successfully read byte count into potential exit value, if it doesn't turn out to match $JOBLENGTH.
   cmp $JOBLENGTH, %al # al is LSB of rax: did we read EXACTLY the number of bytes we wanted?
-  jne _goodEnd # If not, then bail back to shell or other caller.
+  jne goodEnd # If not, then bail back to shell or other caller.
 
-_lookForFlushCode:
-  leaq readWriteBuffer(%rip), %rdi # Store memory location into arg1 again
-  leaq flushCode(%rip), %rsi # Store code to compare it against into arg2
-  mov $JOBLENGTH, %ecx # Store length of string to compare
-  cld # Clear direction flag, aka "crawl forwards through memory for this compare"
-  repe cmpsb # Compare strings in memory
+// lookForFlushCode:
+//   leaq readWriteBuffer(%rip), %rdi # Store memory location into arg1 again
+//   leaq flushCode(%rip), %rsi # Store code to compare it against into arg2
+//   mov $JOBLENGTH, %ecx # Store length of string to compare
+//   cld # Clear direction flag, aka "crawl forwards through memory for this compare"
+//   repe cmpsb # Compare strings in memory
 
-  # For now that just means skip the assertion checks.
-  # Later it will also mean skip the calculations for this input,
-  # and run all calculations for pending inputs, outputting them and then
-  # last of all outputting a flush code of our own.
-  jz _output # If strings are identical, treat this as a flush code.
+//   # For now that just means skip the assertion checks.
+//   # Later it will also mean skip the calculations for this input,
+//   # and run all calculations for pending inputs, outputting them and then
+//   # last of all outputting a flush code of our own.
+//   jz _output # If strings are identical, treat this as a flush code.
 
 
 
 /*
-_checkAssertions:
+checkAssertions:
   leaq CurrentIterations(%rip), %rax # address where both Uint31 "iterations" values are stored, one after the other.
   movq (%rax), %rax # Load both Uint31 values into one 64-bit register
   rorq $32, %rax # swap MaximumIterations into LSDW
@@ -96,7 +95,12 @@ _checkAssertions:
   jnz CurrentIterationsMustHaveHighBitUnset
 */
 
-_output:
+calculate:
+// prep for inner loop, TBI
+calculateInnerLoop:
+// TBI
+
+output:
   //// Write 40 bytes from readWriteBuffer into STDOUT
   putMemoryMacro messageLocation=readWriteBuffer(%rip),length=$JOBLENGTH
   // leaq readWriteBuffer(%rip), %rdi # move memory location into arg1
@@ -106,15 +110,15 @@ _output:
 
   jmp _start # loop back to begining to do it all again, baby!
 
-_goodEnd:
+goodEnd:
   mov $60, %rax # systemExit code
   // mov $0, %rdi # return code to caller: no errors to report
   syscall
 
-_badEnd:
-  mov $60, %rax # systemExit code
-  mov $1, %rdi # return code to caller: something done borked, brah!
-  syscall
+// badEnd:
+//   mov $60, %rax # systemExit code
+//   mov $1, %rdi # return code to caller: something done borked, brah!
+//   syscall
 
 
   // This would convert the length of successfully read input into decimal, then print that to stdout.
@@ -134,7 +138,7 @@ _badEnd:
   // call putMemoryProcedure
   // putNewlineMacro
 
-
+/*
 MaximumIterationsMustHaveHighBitUnset:
   softError message="MaximumIterations must have high bit unset"
   
@@ -143,29 +147,31 @@ MaximumIterationsMustBeLargerThanZero:
 
 CurrentIterationsMustHaveHighBitUnset:
   softError message="CurrentIterations must have high bit unset"
+*/
 
 # Data
 
   .data
+numberOfLanesToReport:
+  .quad 2
   .balign 64
 readWriteBuffer:
   // .skip 40 // nvm, I'll break this out into fields below instead.
-beginPrefix:
 Xstart:
-  .skip 8
+  .skip XMMBYTESIZE
 Ystart:
-  .skip 8
+  .skip XMMBYTESIZE
 afterPrefix:
 Xcurrent:
-  .skip 8
+  .skip XMMBYTESIZE
 Ycurrent:
-  .skip 8
+  .skip XMMBYTESIZE
 CurrentIterations:
-  .skip 4
+  .skip 8
 MaximumIterations:
-  .skip 4
-flushCode:
-  .fill 40,1,0xFF
+  .skip 8
+// flushCode:
+//   .fill 40,1,0xFF
 // messageBuffer:
 //   .skip 256
 

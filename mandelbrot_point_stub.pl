@@ -111,15 +111,17 @@ use constant
 , JOB_KEY_BYTE_SIZE => 16
 , FLOAT64_BYTE_SIZE => 8
 , PACK_JOB_BYTES => 40
-, PACK_JOB_FORMAT => 'ddddVV'
-, PACK_KEY_FORMAT => 'dd'
+# , PACK_JOB_FORMAT => 'ddddVV'
+, PACK_JOB_PALLET_FORMAT => 'ddddddddVVVV'
 , XSTART_INDEX => 0
 , YSTART_INDEX => 1
 , XCURRENT_INDEX => 2
 , YCURRENT_INDEX => 3
 , CURRENT_ITERATION_INDEX => 4
 , MAXIMUM_ITERATION_INDEX => 5
-, FLUSH_CODE => pack('C*', @{[(255) x 40]})
+, PACKED_31BIT_INT => 'V'
+, ACTIVE_LANES => 2
+# , FLUSH_CODE => pack('C*', @{[(255) x 40]})
 };
 use IO::Select;
 use IO::Handle;
@@ -130,15 +132,17 @@ binmode(STDOUT);
 binmode(STDERR);
 
 my($input, $output);
-my($INPUT_LENGTH_IN_BYTES) = my($OUTPUT_LENGTH_IN_BYTES) = 40;
+my($INPUT_LENGTH_IN_BYTES) =
+  my($OUTPUT_LENGTH_IN_BYTES) =
+  ACTIVE_LANES * PACK_JOB_BYTES;
+print pack(PACKED_31BIT_INT, 2); # only support 2 lanes for the time being
 
 my($select) = IO::Select->new();
 
 $select->add(\*STDIN);
 
 while($select->can_read())
-{ my($softError) = FALSE;
-  $! = 0;
+{ $! = 0;
   $@ = '';
   my($lengthRead) = sysread(STDIN, $input, $INPUT_LENGTH_IN_BYTES);
   exit if($lengthRead < 1);
@@ -147,92 +151,69 @@ while($select->can_read())
   die("Sysread says that we read $lengthRead bytes, but I'm only seeing ". length($input) ." bytes in the buffer. $! $@")
     unless(length($input) == $lengthRead);
 
-  if($input eq FLUSH_CODE)
-  { print FLUSH_CODE;
-    next;
+  my($jobs) = [];
+  ( $jobs->[0]{Xstart}
+  , $jobs->[1]{Xstart}
+  , $jobs->[0]{Ystart}
+  , $jobs->[1]{Ystart}
+  , $jobs->[0]{Xcurrent}
+  , $jobs->[1]{Xcurrent}
+  , $jobs->[0]{Ycurrent}
+  , $jobs->[1]{Ycurrent}
+  , $jobs->[0]{currentIterations}
+  , $jobs->[1]{currentIterations}
+  , $jobs->[0]{maximumIterations}
+  , $jobs->[1]{maximumIterations}
+  ) = unpack(PACK_JOB_PALLET_FORMAT, $input);
+
+  for my $job (@$jobs)
+  { until
+    ( $job->{currentIterations}>=$job->{maximumIterations}
+    ||$job->{Xcurrent}*$job->{Xcurrent} + $job->{Ycurrent}*$job->{Ycurrent} > ESCAPE_SQUARED
+    )
+    { $job->{currentIterations}++;
+      my $tempY = $job->{Ycurrent}*$job->{Ycurrent};
+      my $tempX = $job->{Xcurrent}*$job->{Xcurrent} - $tempY + $job->{Xstart};
+      $job->{Ycurrent} = 2 * $job->{Xcurrent} * $job->{Ycurrent} + $job->{Ystart};
+      $job->{Xcurrent} = $tempX;
+    }
   }
-  my($jobKey) = substr($input, 0, JOB_KEY_BYTE_SIZE); # this is Xstart and Ystart in packed form
-#CORE::say STDERR $jobKey, encode_json(['input', unpack('H*', $input), [unpack(PACK_KEY_FORMAT, $input)], 'jobKey', unpack('H*', $jobKey), [unpack(PACK_KEY_FORMAT, $jobKey)]]);
-  my($Xstart, $Ystart, $Xcurrent, $Ycurrent, $currentIterations, $maximumIterations)
-  = unpack(PACK_JOB_FORMAT, $input);
 
-  eval
-  { myAssertSoft
-      ( $jobKey
-      , $currentIterations <= MAX_31_BIT_INTEGER
-      , "CurrentIterations must have high bit unset"
-      );
-
-    myAssertSoft
-      ( $jobKey
-      , $maximumIterations <= MAX_31_BIT_INTEGER
-      , "MaximumIterations must have high bit unset"
-      );
-
-    myAssertSoft
-      ( $jobKey
-      , $maximumIterations > 0
-      , "MaximumIterations must be larger than zero"
-      );
-
-=pod
-    myAssertSoft
-      ( $jobKey
-      , $maximumIterations >= $currentIterations
-      , "MaximumIterations must be greater than or equal to CurrentIterations"
-      );
-=cut
-
-  };
-  # die($@);
-  $softError = !!($@ =~ /Soft Assertion Failure/);
-
-=pod
-  until
-  ( $softError
-  ||$currentIterations>=$maximumIterations
-  ||$Xcurrent*$Xcurrent + $Ycurrent*$Ycurrent > ESCAPE_SQUARED
-  )
-  { $currentIterations++;
-    my $tempY = $Ycurrent*$Ycurrent;
-    my $tempX = $Xcurrent*$Xcurrent - $tempY + $Xstart;
-    $Ycurrent = 2 * $Xcurrent * $Ycurrent + $Ystart;
-    $Xcurrent = $tempX;
-  }
-=cut
-
-  output
-  ( $softError
-  , $Xstart, $Ystart
-  , $Xcurrent, $Ycurrent
-  , $currentIterations, $maximumIterations
+  print
+  pack
+  ( PACK_JOB_PALLET_FORMAT
+  , $jobs->[0]{Xstart}
+  , $jobs->[1]{Xstart}
+  , $jobs->[0]{Ystart}
+  , $jobs->[1]{Ystart}
+  , $jobs->[0]{Xcurrent}
+  , $jobs->[1]{Xcurrent}
+  , $jobs->[0]{Ycurrent}
+  , $jobs->[1]{Ycurrent}
+  , $jobs->[0]{currentIterations}
+  , $jobs->[1]{currentIterations}
+  , $jobs->[0]{maximumIterations}
+  , $jobs->[1]{maximumIterations}
   );
 }
 
-sub output
-{ my $softError = shift;
-  if($softError) # bad?
-  { $_[2] = $_[3] = $_[4] = $_[5] = 0;
-  }
-  print pack(PACK_JOB_FORMAT, @_);
-}
+# sub myAssertSoft
+# { my($jobKey, $test, $message) = @_;
+#   if(!$test)
+#   { CORE::say STDERR $jobKey, $message;
+#     die('Soft Assertion Failure');
+#   }
+# }  
 
-sub myAssertSoft
-{ my($jobKey, $test, $message) = @_;
-  if(!$test)
-  { CORE::say STDERR $jobKey, $message;
-    die('Soft Assertion Failure');
-  }
-}  
+# sub myAssertFatal
+# { my($jobKey, $test, $message) = @_;
+#   if(!$test)
+#   { myAssertSoft($jobKey, FALSE, $message);
+#     exit 1;
+#   }
+# }  
 
-sub myAssertFatal
-{ my($jobKey, $test, $message) = @_;
-  if(!$test)
-  { myAssertSoft($jobKey, FALSE, $message);
-    exit 1;
-  }
-}  
-
+my($nothing) = <<'ENDCOMMENT';
 # input: anonymous function and a hash reference
 # A new hash reference with the same keys is created,
 # every value of which is the output of the argument function
@@ -255,3 +236,4 @@ sub fmod
   $_[1] * ($dividend - floor($dividend));
 }
 
+ENDCOMMENT

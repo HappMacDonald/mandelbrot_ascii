@@ -1,5 +1,21 @@
 #!/bin/perl -CS
 
+#############################
+##  Current protocol spec  ##
+#############################
+# 1. Caller invokes engine
+# 2. Caller blocks, engine emits 31-bit integer specifying how many lanes to fill.
+# 3. Caller will now prepare blocks of memory 40 x $lanes bytes long to pass
+#    through pipes to make jobs happen..
+# 4. I think we are safe to treat STDIN and STDOUT as buffers here:
+#    caller can dump any number of COMPLETE jobs (no fragmentation allowed),
+#    with any timing into STDIN then come back to check STDOUT at leasure
+#    to pick up the results.
+# 5. No flush codes: caller will fill all joblanes not being used for a particular
+#    job batch with 0xFF bytes and will get the same in the result batches.
+# 6. No timeouts: engine gets batches, processes batches, posts results
+#    at full speed with no blocking until/unless the in pipe is empty.
+
 use strict;
 use warnings;
 # I cannot easily support "binary data" and UTF-8 at the same time.
@@ -12,8 +28,10 @@ use constant
 { FALSE => 0
 , TRUE => 1
 , PACK_JOB_BYTES => 40
-, PACK_JOB_FORMAT => 'ddddVV'
-, PACK_KEY_FORMAT => 'dd'
+# , PACK_JOB_FORMAT => 'ddddVV'
+# , PACK_KEY_FORMAT => 'dd'
+, PACK_PALLET_FORMAT => 'ddddddddVVVV'
+, PACKED_31BIT_INT => 'V'
 , XSTART_INDEX => 0
 , YSTART_INDEX => 1
 , XCURRENT_INDEX => 2
@@ -21,7 +39,7 @@ use constant
 , CURRENT_ITERATION_INDEX => 4
 , MAXIMUM_ITERATION_INDEX => 5
 # @{[(255) x 40]} mess here means array of 40 0xff's
-, FLUSH_CODE => pack('C*', @{[(255) x 40]})
+# , FLUSH_CODE => pack('C*', @{[(255) x 40]})
 , JOB_KEY_BYTE_SIZE => 16
 , FLOAT64_BYTE_SIZE => 8
 };
@@ -44,15 +62,108 @@ binmode(STDOUT);
 binmode(STDERR);
 
 
-# my(@executableToTest) = qw(./mandelbrot_point_stub.pl);
-my(@executableToTest) = qw(./mandelbrot_point.elf64);
+my(@executableToTest) = qw(./mandelbrot_point_stub.pl);
+# my(@executableToTest) = qw(./mandelbrot_point.elf64);
 # my(@executableToTest) = qw(sed s/e/@/g);
 
 my($childInput, $childOutput, $childError, $timer, $childProcess);
 my($timeoutInterval) = 0.3;
+my($ACCEPTABLE_LANE_CONFIGS) =
+{ 1 => 1 # Scalar only? It might be good for testing or something, I'unno.
+, 2 => 1 # SSE42
+, 4 => 1 # AVX1/2
+, 8 => 1 # AVX512
+, 16 => 1 # AVX1024?
+};
 my($debug)=FALSE;
 
 $childProcess = spawn();
+my($ACTIVE_LANES) = getLanes();
+
+die
+( "Received this from engine instead of lanes data:"
+. unpack("H*", $childOutput)
+. " Child reported error: $childError"
+)
+unless
+( defined($ACTIVE_LANES)
+&&!!$ACCEPTABLE_LANE_CONFIGS->{$ACTIVE_LANES}
+);
+
+$childOutput = $childError = '';
+
+testPallet
+( [ .1, 0
+  , .1, 0
+  , .1, 0
+  , .1, 0
+  , 0, 0
+  , 1, 0
+  ]
+, [ .1, 0
+  , .1, 0
+  , .1, 0
+  , .12, 0
+  , 1, 0
+  , 1, 0
+  ]
+, 'Value check #1'
+);
+
+# Not even using second value in this pallet because I'm too lazy to think of another test rn :P
+testPallet
+( [ .5, 0
+  , .8, 0
+  , 0, 0
+  , 0, 0
+  , 1000, 0
+  , 1004, 0
+  ]
+, [ .5, 0
+  , .8, 0
+  , -2.0479, 0
+  , 1.152, 0
+  , 1003, 0
+  , 1004, 0
+  ]
+, 'Value check #2'
+);
+
+
+done_testing();
+exit 0; #Tests compleat.
+
+sub testPallet
+{ $childInput = pack(PACK_PALLET_FORMAT, @{shift()});
+  my $expectedOutput = pack(PACK_PALLET_FORMAT, @{shift()});
+  my $testName = shift;
+
+  $childProcess->pump() while length $childInput;
+  # die(Dumper($childInput, $childOutput, $childError));
+
+  is(length($childOutput), 80, 'pallet size')
+    or warn 'didn\'t get a proper sized pallet back';
+  is(length($childError), 0, 'error check')
+    or warn "Child reported the following error: $childError";
+
+  ok(is_pallet($childOutput, $expectedOutput), $testName)
+  ||( diag
+      ( "Output mismatch!"
+      . Dumper
+        ( [unpack(PACK_PALLET_FORMAT, $childOutput)]
+        , [unpack(PACK_PALLET_FORMAT, $expectedOutput)]
+        , unpack('H*', $childOutput)
+        , unpack('H*', $expectedOutput)
+        , $childError
+        )
+      )
+    );
+
+  $childInput = $childOutput = $childError = '';
+}
+
+=pod
+
 # Soft Error test
 feedChild
 ( [ 'MaximumIterations must have high bit unset'
@@ -124,6 +235,8 @@ exit 0; #Tests compleat.
 # $childProcess->finish();
 # $childProcess->kill_kill();
 
+=cut
+
 # Returns handle to child process
 sub spawn
 { start
@@ -135,20 +248,27 @@ sub spawn
   );
 }
 
-# This forces child to process all pending inputs
-sub flush
-{ $childInput = FLUSH_CODE;
-my $retries = 2;
-  until($retries-- < 1 || !!(substr($childOutput, -PACK_JOB_BYTES) eq FLUSH_CODE))
-  { 
-# die(encode_json({childOutput => $childOutput, childError => $childError, is => $childOutput =~ /FLUSH_CODE/}))
-#   if(length($childOutput) + length($childError));
-print '[flush pump';
-    eval { $childProcess->pump(); };
-CORE::say ']';
-  }
+# This learns how many lanes to prepare per job pallet
+sub getLanes
+{ $childInput = '';
+  $childProcess->pump();
+  unpack(PACKED_31BIT_INT, $childOutput);
 }
 
+
+sub is_pallet
+{ my(@a) = unpack(PACK_PALLET_FORMAT, shift);
+  my(@b) = unpack(PACK_PALLET_FORMAT, shift);
+  my($tolerance) = shift || 1e-6;
+
+  # Since all items are either int or float, we can treat them as
+  # all as float safely for comparison's sake.
+
+  my @c = grep { abs($a[$_]-$b[$_])>$tolerance } 0..$#a;
+  !@c;
+}
+
+=pod
 # 100% Unique string based upon Xstart and Ystart values
 # to match up inputs with outputs.
 # Same as substr($packedData, 0, <something>)..

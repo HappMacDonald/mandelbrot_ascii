@@ -13,6 +13,41 @@ Perl code:
     $Xcurrent = $tempX;
   }
 
+== 2022-03-21 Exact SIMD register usage, and needed operations:
+%xmm0 = Xstarts[0] | Xstarts[1]
+%xmm1 = Ystarts[0] | Ystarts[1]
+%xmm2 = Xcurrents[0] | Xcurrents[1]
+%xmm3 = Ycurrents[0] | Ycurrents[1]
+
+?? = 4.0 | 4.0 (to compare against for escape)
+%xmm5 = Calculating?[0] | Calculating?[1]
+%xmm6 = CurrentIterations[0] | CurrentIterations[0] | CurrentIterations[1] | CurrentIterations[1]
+%xmm7 = MaximumIterations[0] | MaximumIterations[0] | MaximumIterations[1] | MaximumIterations[1]
+
+-- needed operations:
+1. increment all int63
+2. compare all int63 between two registers, results as masks.
+* 3. [retired]
+4. Square all float64
+* 5. Worst case, this would be "copy one register to another" followed by "mult two registers".
+6. Add/Subtract/Multiply all float64 in one reg to all float64 in another
+7. Compare all float64 in one reg to all float64 in another (results in mask bits)
+* 8. An alternative might be "multiply/divide" all float64 by a power of two
+* 9. and "compare all float64 against a constant float, perhaps only 1.0?" or
+* 10. "compare all float64 exponents against a constant"
+I know that movaps can full-copy (reg/mem) to (reg/mem).
+
+-- candidates:
+PADDQ Add packed quadword integers
+* 1
+PCMPEQD/PCMPGTQ compare for equality/greater-than packed signed doubleword integers (eg int31)
+* 2
+ADDPD/SUBPD/MULPD add/subtract/multiply Packed Double-Precision Floating-Point Values
+* 6
+CMPPD Compare Packed Double-Precision Floating-Point Values
+* 7
+
+
 == 2022-03-05 Newest realization:
 * Caller WILL have to arrange memory for SIMD consumption after all.
 -- The caller being slower than the inner loop isn't the problem: NEVER EVER EVER housekeep during the inner loop, it's code smell.

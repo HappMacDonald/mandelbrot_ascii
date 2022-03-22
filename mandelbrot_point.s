@@ -1,13 +1,7 @@
 # Current status:
-# gcc -ggdb -Wall -F dwarf -nostartfiles -nostdlib -g3 -m64 mandelbrot_point.s libmb_s.s -o mandelbrot_point.elf64
-# perl -e 'print pack("ddddVV", 0,1,2,3,4,5);' | ./mandelbrot_point.elf64 | perl -MJSON -e 'binmode(STDIN); my $q=<>; CORE::say length($q); CORE::say encode_json([$q, unpack("ddddVV", $q)]);'
+# gcc -nostartfiles -nostdlib -O3 -Wall -g -gdwarf-4 -g3 -F dwarf -m64 mandelbrot_point.s -o mandelbrot_point.elf64 && ./mandelbrot_point_test.t
 # This seems to work so far (just echos input, does not yet perform computation)
-# Also echos input when you swap in zero for CurrentIterations
-# And if you swap in a zero for MaximumIterations, or a negative number for either "iterations" value,
-# then it will properly *detect* a failed assertion and behave differently.
-# It just won't behave *correctly* as far as I can tell.
-# Seems to end w/ no STDOUT and no STDERR, and no coredump.
-# So I've got to figure out how to best GDB that with challenging to set up STDIN.
+# Next step: SIMD Calculations at bench testing phase. Code compiles. 😲
 
 .include "libmb_s.h"
 
@@ -15,49 +9,34 @@
 
 # Definitions
 
-JOBLENGTH = 80 # perl pack syntax 'ddddddddVVVV'
+JOBLENGTH = 96 # perl pack syntax 'ddddddddxxxxVxxxxVxxxxVxxxxV'
 XMMBYTESIZE = 16
-// OFFSET_XSTART = 0
-// OFFSET_YSTART = 8
-// OFFSET_XCURRENT = 16
-// OFFSET_YCURRENT = 24
-// OFFSET_CURRENTITERATIONS = 32
-// OFFSET_MAXIMUMITERATIONS = 36
-// HIGH_32_BIT_MASK = 0x80000000
+SIMD_Xstarts = %xmm0
+SIMD_Ystarts = %xmm1
+SIMD_Xcurrents = %xmm2
+SIMD_Ycurrents = %xmm3
+SIMD_CurrentIterations = %xmm6
+SIMD_MaximumIterations = %xmm7
+SIMD_onePerLaneUint63 = %xmm8
+SIMD_EscapeSquared = %xmm10
+SIMD_DoubleTwoDoubles = %xmm11
 
+// OFFSET_XSTARTS = 0
+// OFFSET_YSTARTS = 16
+// OFFSET_XCURRENTS = 32
+// OFFSET_YCURRENTS = 48
+// OFFSET_CURRENTITERATIONS = 64
+// OFFSET_MAXIMUMITERATIONS = 72
 
 # Macros
 
-/*
-// Clobbers child-owned values
-.macro softError message:req
-  // Print the prefix for the error
-  putMemoryMacro messageLocation=readWriteBuffer(%rip),length=$PREFIXLENGTH,fileDescriptor=$STDERR
-  putMemoryMacro messageLocation=putsMessage\@(%rip),length=$putsMessage\@Length,fileDescriptor=$STDERR
-	jmp softErrorEnd\@
-putsMessage\@:
-  .string "\message"
-  putsMessage\@Length = . - putsMessage\@ - 1
-  .align 8
-softErrorEnd\@:
-
-  putNewlineMacro fileDescriptor=$STDERR
-
-  // Zero out final 32 bytes of job description
-  xorps %xmm0, %xmm0 # Clear SSE4.2 128 bit register to write 16 bytes of zeros at a time
-  leaq afterPrefix(%rip), %rax # load output buffer location
-  movdqa      %xmm0, (%rax)
-  addq $XMMBYTESIZE, %rax # increment to last chunk that needs zeroing
-  movhps      %xmm0, (%rax)
-  jmp _output
-.endm
-*/
 
 .text
 _start:
   // On startup, report number of lanes that this engine supports.
   putMemoryMacro messageLocation=numberOfLanesToReport(%rip),length=$4
 
+input:
   // Read first job pallet
   getMemoryMacro messageLocation=readWriteBuffer(%rip),length=$JOBLENGTH
 
@@ -96,19 +75,100 @@ checkAssertions:
 */
 
 calculate:
-// prep for inner loop, TBI
+calculatePrep:
+  movaps Xstarts(%rip), SIMD_Xstarts
+  movaps Ystarts(%rip), SIMD_Ystarts
+  movaps Xcurrents(%rip), SIMD_Xcurrents
+  movaps Ycurrents(%rip), SIMD_Ycurrents
+  movaps CurrentIterations(%rip), SIMD_CurrentIterations
+  movaps MaximumIterations(%rip), SIMD_MaximumIterations
+  movaps onePerLaneUint63(%rip), SIMD_onePerLaneUint63
+  movaps EscapeSquared(%rip), SIMD_EscapeSquared
+  movaps DoubleTwoDoubles(%rip), SIMD_DoubleTwoDoubles
+
 calculateInnerLoop:
-// TBI
+  //xmm5 = Max>Cur
+  movaps SIMD_MaximumIterations, %xmm5
+  pcmpgtq SIMD_CurrentIterations, %xmm5
+
+  //xmm4 = xmm11 = Xcurrent^2
+  movaps SIMD_Xcurrents, %xmm4
+  mulpd %xmm4, %xmm4
+  movaps %xmm4, %xmm11
+
+  //xmm9 = Ycurrent^2
+  movaps SIMD_Ycurrents, %xmm9
+  mulpd %xmm9, %xmm9
+
+  //xmm9 +=> xmm4(CurrentMagnitudeSquared)
+  addpd %xmm9, %xmm4
+//xmm9 still Ycurrent squared
+//xmm11 still Xcurrent squared
+
+  //%xmm4 = %xmm4 < SIMD_EscapeSquared(EscapeSquared) / AT&T syntax comparison is backwards
+  cmpltpd SIMD_EscapeSquared, %xmm4 
+
+  //%xmm5(Bounded iterations?) &&=> %xmm4 (Bounded point? => ActiveCalculation)
+  pand %xmm5, %xmm4
+//RELEASE %xmm5
+
+  //Abort if our mask is all zero
+  ptest %xmm4, %xmm4
+  jz calculateCleanup
+
+  //Conditional CurrentIterations++
+  //SIMD_onePerLaneUint63 &&=> xmm4 (mask => amount to increment)
+  pand SIMD_onePerLaneUint63, %xmm4
+  //xmm4 +=> SIMD_CurrentIterations
+  paddq %xmm4, SIMD_CurrentIterations
+//RELEASE %xmm4
+
+  //The rest of the calculations are unconditional,
+  //since at least one lane needs them done,
+  //and since nobody cares about XYCurrent after CurrentIterations has
+  //stopped increasing.
+
+  //%xmm9 (Ysquared) subtracted from => %xmm11 (Xsquared => TempX)
+  subpd %xmm9, %xmm11
+//RELEASE xmm9
+
+  //SIMD_Xstarts +=> %xmm11 (TempX)
+  addpd SIMD_Xstarts, %xmm11
+
+  //2 * SIMD_Xcurrents * SIMD_Xstarts *=> SIMD_Ycurrents (updated)
+  mulpd SIMD_DoubleTwoDoubles, SIMD_Ycurrents
+  mulpd SIMD_Xcurrents, SIMD_Ycurrents
+  mulpd SIMD_Xstarts, SIMD_Ycurrents
+
+  // xmm11 => SIMD_Xcurrents
+  movaps %xmm11, SIMD_Xcurrents
+//RELEASE xmm11 
+
+  jmp calculateInnerLoop
+
+// Reached by bail condition from above
+calculateCleanup:
+  // XYstarts ought to never change in calculateInnerLoop
+  // movaps SIMD_Xstarts, Xstarts(%rip)
+  // movaps SIMD_Ystarts, Ystarts(%rip)
+
+  movaps SIMD_Xcurrents, Xcurrents(%rip)
+  movaps SIMD_Ycurrents, Ycurrents(%rip)
+  movaps SIMD_CurrentIterations, CurrentIterations(%rip)
+  
+  // MaximumIterations ought to never change in calculateInnerLoop
+  // movaps SIMD_MaximumIterations, MaximumIterations(%rip)
+
+  // All of the below are constants loaded into registers only for convenience.
+  // movaps SIMD_onePerLaneUint63, onePerLaneUint63(%rip)
+  // movaps SIMD_EscapeSquared, EscapeSquared(%rip)
+  // movaps SIMD_DoubleTwoDoubles, DoubleTwoDoubles(%rip)
+
+
 
 output:
-  //// Write 40 bytes from readWriteBuffer into STDOUT
   putMemoryMacro messageLocation=readWriteBuffer(%rip),length=$JOBLENGTH
-  // leaq readWriteBuffer(%rip), %rdi # move memory location into arg1
-  // mov $JOBLENGTH, %rsi # move length into arg2
-  // mov $STDOUT, %rdx # define recently vacated arg3
-  // call putMemoryProcedure
-
-  jmp _start # loop back to begining to do it all again, baby!
+  jmp input # loop back to begining to do it all again, baby!
 
 goodEnd:
   mov $60, %rax # systemExit code
@@ -157,19 +217,24 @@ numberOfLanesToReport:
   .balign 64
 readWriteBuffer:
   // .skip 40 // nvm, I'll break this out into fields below instead.
-Xstart:
+Xstarts:
   .skip XMMBYTESIZE
-Ystart:
+Ystarts:
   .skip XMMBYTESIZE
-afterPrefix:
-Xcurrent:
+Xcurrents:
   .skip XMMBYTESIZE
-Ycurrent:
+Ycurrents:
   .skip XMMBYTESIZE
 CurrentIterations:
-  .skip 8
+  .skip XMMBYTESIZE
 MaximumIterations:
-  .skip 8
+  .skip XMMBYTESIZE
+onePerLaneUint63:
+  .quad 1,1 
+DoubleTwoDoubles:
+  .double 2.0,2.0
+EscapeSquared:
+  .double 4.0,4.0 
 // flushCode:
 //   .fill 40,1,0xFF
 // messageBuffer:

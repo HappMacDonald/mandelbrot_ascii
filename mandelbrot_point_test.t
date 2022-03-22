@@ -27,10 +27,10 @@ use bytes;
 use constant
 { FALSE => 0
 , TRUE => 1
-, PACK_JOB_BYTES => 40
+, PACK_JOB_BYTES => 48
 # , PACK_JOB_FORMAT => 'ddddVV'
 # , PACK_KEY_FORMAT => 'dd'
-, PACK_PALLET_FORMAT => 'ddddddddVVVV'
+, PACK_PALLET_FORMAT => 'ddddddddVxxxxVxxxxVxxxxVxxxx'
 , PACKED_31BIT_INT => 'V'
 , XSTART_INDEX => 0
 , YSTART_INDEX => 1
@@ -116,7 +116,7 @@ testPallet
   , .8, 0
   , 0, 0
   , 0, 0
-  , 1000, 0
+  , 1000, 999
   , 1004, 0
   ]
 , [ .5, 0
@@ -141,7 +141,7 @@ sub testPallet
   $childProcess->pump() while length $childInput;
   # die(Dumper($childInput, $childOutput, $childError));
 
-  is(length($childOutput), 80, 'pallet size')
+  is(length($childOutput), 96, 'pallet size')
     or warn 'didn\'t get a proper sized pallet back';
   is(length($childError), 0, 'error check')
     or warn "Child reported the following error: $childError";
@@ -150,11 +150,12 @@ sub testPallet
   ||( diag
       ( "Output mismatch!"
       . Dumper
-        ( [unpack(PACK_PALLET_FORMAT, $childOutput)]
-        , [unpack(PACK_PALLET_FORMAT, $expectedOutput)]
-        , unpack('H*', $childOutput)
-        , unpack('H*', $expectedOutput)
-        , $childError
+        ( { childOutputElements => [unpack(PACK_PALLET_FORMAT, $childOutput)]
+          , expectedOutputElements => [unpack(PACK_PALLET_FORMAT, $expectedOutput)]
+          , childOutputHex => unpack('H*', $childOutput)
+          , expectedOutputHex => unpack('H*', $expectedOutput)
+          , childError => $childError
+          }
         )
       )
     );

@@ -1,10 +1,14 @@
 #!/bin/perl -CS
 
 ##### Current Status
-# This version uses the SIMD engine.
-# Since perl algo is faster for shallow zooms, I'm setting a maximumiteration
-# threshold below which Perl algo will be used, and above which
-# SIMD engine will get used.
+# One thing I'd like to see is if the SIMD engine IPC bottleneck can be alleviated any.
+# I've confirmed that each pallet's IPC costs the same as roughly 65536 total iterations per pallet!
+# This imposes approximately 7-8 seconds of delay on ~144p images,
+# and I have yet to encounter a deep zoom that takes more than 50% longer than that..
+# so complete removal of the bottleneck would still make things
+# 3x or better faster than current.
+# "Complete" removal is nowhere near reasonable to expect, but I'll have to
+# find out how close to that ideal I'm able to hew.
 #############
 # CLI arguments:
 # * [viewportCenterX default -0.5]
@@ -144,8 +148,8 @@ unless
 ( defined($ACTIVE_LANES)
 &&!!$ACCEPTABLE_LANE_CONFIGS->{$ACTIVE_LANES}
 );
-
-$childOutput = $childError = '';
+my($PALLET_SIZE) = PACK_JOB_BYTES * $ACTIVE_LANES;
+$childInput = $childOutput = $childError = '';
 
 
 sub setParameters
@@ -166,7 +170,7 @@ sub setParameters
     , viewPortCenterY => 0
     , viewPortHeight => 4
     , maximumIterations => 100
-    , engineThreshold => 3000
+    , engineThreshold => 1599
     , %$parameters
     , %$newParameters
     )
@@ -215,6 +219,7 @@ setParameters
 , viewPortCenterY => $ARGV[1]
 , viewPortHeight => $ARGV[2]
 , maximumIterations => $ARGV[3]
+, engineThreshold => $ARGV[4]
 );
 
 my($inputCommands) =
@@ -346,11 +351,18 @@ sub drawSet
 { resetScreen();
   my($startYindex) = $parameters->{viewPortTextSize}{y};
   my($topOfScreen) = TRUE;
+  my($engine) =
+    ( $parameters->{maximumIterations}
+    > $parameters->{engineThreshold}
+    )?'SIMD'
+    : 'PERL';
+
   while($startYindex-- >0)
   { resetColors();
     print "\n" unless $topOfScreen;
-    # sleep 2;
     $topOfScreen = FALSE;
+
+    $childInput = $childOutput = $childError = '';
 
     # Two samples per character
     my($startYs) =
@@ -366,10 +378,8 @@ sub drawSet
         );
       my(@samples) = (0,0);
 
-      # Deep zoom?
-      if($parameters->{maximumIterations} > $parameters->{engineThreshold})
-      { # Yes: Then use SIMD ASM engine.
-        $childInput =
+      if($engine eq 'SIMD')
+      { $childInput .=
           pack
           ( PACK_PALLET_FORMAT
           , $startX, $startX
@@ -379,32 +389,8 @@ sub drawSet
           , 1, 1
           , $parameters->{maximumIterations}, $parameters->{maximumIterations}
           );
-
-        $timer->start($timeoutInterval);
-        eval
-        { $childProcess->pump() while length $childInput;
-        };
-        end($@) if($@);
-
-        end
-        ( 'didn\'t get a proper sized pallet back. '
-        . 'Instead, got '. length($childOutput) .' bytes:'
-        . unpack('H*', $childOutput)
-        ) unless(length($childOutput) == 96);
-          
-        end("Child reported the following error: $childError")
-          unless(length($childError) == 0);
-          
-        @samples = unpack(PACK_PALLET_CURRENT_ITERATIONS_ONLY, $childOutput);
-        $childOutput = '';
-
-        # This is a quick trick to make "maxint" results reset to zero,
-        # without changing any other valid output values.
-        foreach my $index (0..1)
-        { $samples[$index] %= $parameters->{maximumIterations};
-        }
       }
-      else # No: Then use pure perl engine (no IPC bottleneck per pixel)
+      else # $engine ne 'SIMD'.. we'll assume 'PERL'.
       { foreach my $index (0..1)
         { my($startY) = $startYs->[$index];
           my($currentX, $currentY) = ($startX, $startY);
@@ -423,18 +409,40 @@ sub drawSet
           # without changing any other valid output values.
           $iterations %= $parameters->{maximumIterations};
           $samples[$index] = $iterations;
-
-          # if($iterations>=$parameters->{maximumIterations})
-          # { print $mandelbrotInteriorCharacterA;
-          # }
-          # else
-          # { printCellA($iterations);
-          # }
-      # CORE::say("!$iterations!");
         }
+        printCellB(@samples);
       }
-      printCellB(@samples);
     }
+    # Extra step for SIMD: don't calculate & write until the end of each row.
+    if($engine eq 'SIMD')
+    { $startXindex = $parameters->{viewPortTextSize}{x};
+
+      while($startXindex --> 0)
+      { my($pallet);
+# CORE::say STDERR encode_json([when => 'before', childOutputLength => length($childOutput), childInputLength => length($childInput)]);
+        $timer->start($timeoutInterval);
+        eval
+        { $childProcess->pump() until(length($childOutput)>=$PALLET_SIZE);
+        };
+        end($@) if($@);
+        $pallet = substr($childOutput, 0, $PALLET_SIZE, '');
+# CORE::say STDERR encode_json([when => 'after', palletLength => length($pallet), childOutputLength => length($childOutput), childInputLength => length($childInput)]);
+
+        end("Child reported the following error: $childError")
+          unless(length($childError) == 0);
+        
+        my(@samples) = unpack(PACK_PALLET_CURRENT_ITERATIONS_ONLY, $pallet);
+
+        # This is a quick trick to make "maxint" results reset to zero,
+        # without changing any other valid output values.
+        foreach my $index (0..1)
+        { $samples[$index] %= $parameters->{maximumIterations};
+        }
+
+        printCellB(@samples);
+      }
+    }
+    # end("row");
   }
 
   resetColors();

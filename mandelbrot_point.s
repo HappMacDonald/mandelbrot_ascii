@@ -1,7 +1,10 @@
 # Current status:
 # gcc -nostartfiles -nostdlib -O3 -Wall -g -gdwarf-4 -g3 -F dwarf -m64 mandelbrot_point.s -o mandelbrot_point.elf64 && ./mandelbrot_point_test.t
 # This seems to work so far (just echos input, does not yet perform computation)
-# Next step: SIMD Calculations at bench testing phase. Code compiles. 😲
+# Next step: SIMD Calculations at bench testing phase.
+# Every single SIMD instruction appears to be functioning right when debugged,
+# but the overall effect is still wrong: my port of the algorithm is flawed
+# somehow.
 
 .include "libmb_s.h"
 
@@ -19,7 +22,7 @@ SIMD_CurrentIterations = %xmm6
 SIMD_MaximumIterations = %xmm7
 SIMD_onePerLaneUint63 = %xmm8
 SIMD_EscapeSquared = %xmm10
-SIMD_DoubleTwoDoubles = %xmm11
+// SIMD_DoubleTwoDoubles = %xmm12
 
 // OFFSET_XSTARTS = 0
 // OFFSET_YSTARTS = 16
@@ -84,8 +87,7 @@ calculatePrep:
   movaps MaximumIterations(%rip), SIMD_MaximumIterations
   movaps onePerLaneUint63(%rip), SIMD_onePerLaneUint63
   movaps EscapeSquared(%rip), SIMD_EscapeSquared
-  movaps DoubleTwoDoubles(%rip), SIMD_DoubleTwoDoubles
-
+  
 calculateInnerLoop:
   //xmm5 = Max>Cur
   movaps SIMD_MaximumIterations, %xmm5
@@ -136,11 +138,12 @@ calculateInnerLoop:
   addpd SIMD_Xstarts, %xmm11
 
   //2 * SIMD_Xcurrents * SIMD_Xstarts *=> SIMD_Ycurrents (updated)
-  mulpd SIMD_DoubleTwoDoubles, SIMD_Ycurrents
+  // mulpd SIMD_DoubleTwoDoubles, SIMD_Ycurrents
+  addpd SIMD_Ycurrents, SIMD_Ycurrents
   mulpd SIMD_Xcurrents, SIMD_Ycurrents
-  mulpd SIMD_Xstarts, SIMD_Ycurrents
+  addpd SIMD_Ystarts, SIMD_Ycurrents
 
-  // xmm11 => SIMD_Xcurrents
+  // xmm11 (TempX) => SIMD_Xcurrents
   movaps %xmm11, SIMD_Xcurrents
 //RELEASE xmm11 
 
@@ -162,7 +165,6 @@ calculateCleanup:
   // All of the below are constants loaded into registers only for convenience.
   // movaps SIMD_onePerLaneUint63, onePerLaneUint63(%rip)
   // movaps SIMD_EscapeSquared, EscapeSquared(%rip)
-  // movaps SIMD_DoubleTwoDoubles, DoubleTwoDoubles(%rip)
 
 
 
@@ -231,8 +233,8 @@ MaximumIterations:
   .skip XMMBYTESIZE
 onePerLaneUint63:
   .quad 1,1 
-DoubleTwoDoubles:
-  .double 2.0,2.0
+// DoubleTwoDoubles:
+//   .double 2.0,2.0
 EscapeSquared:
   .double 4.0,4.0 
 // flushCode:

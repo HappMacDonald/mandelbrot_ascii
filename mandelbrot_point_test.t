@@ -30,7 +30,7 @@ use constant
 , PACK_JOB_BYTES => 48
 # , PACK_JOB_FORMAT => 'ddddVV'
 # , PACK_KEY_FORMAT => 'dd'
-, PACK_PALLET_FORMAT => 'ddddddddVxxxxVxxxxVxxxxVxxxx'
+, PACK_PALLET_FORMAT => 'ddddddddVx4Vx4Vx4Vx4'
 , PACKED_31BIT_INT => 'V'
 , XSTART_INDEX => 0
 , YSTART_INDEX => 1
@@ -62,8 +62,8 @@ binmode(STDOUT);
 binmode(STDERR);
 
 
-# my(@executableToTest) = qw(./mandelbrot_point_stub.pl);
-my(@executableToTest) = qw(./mandelbrot_point.elf64);
+my(@executableToTest) = qw(./mandelbrot_point_stub.pl);
+# my(@executableToTest) = qw(./mandelbrot_point.elf64);
 # my(@executableToTest) = qw(sed s/e/@/g);
 
 my($childInput, $childOutput, $childError, $timer, $childProcess);
@@ -116,7 +116,7 @@ testPallet
   , .8, 0
   , 0, 0
   , 0, 0
-  , 1000, 999
+  , 1000, 0
   , 1004, 0
   ]
 , [ .5, 0

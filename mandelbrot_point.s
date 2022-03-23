@@ -12,7 +12,7 @@
 
 # Definitions
 
-JOBLENGTH = 96 # perl pack syntax 'ddddddddxxxxVxxxxVxxxxVxxxxV'
+JOBLENGTH = 96 # perl pack syntax 'ddddddddx4Vx4Vx4Vx4V'
 XMMBYTESIZE = 16
 SIMD_Xstarts = %xmm0
 SIMD_Ystarts = %xmm1
@@ -22,14 +22,7 @@ SIMD_CurrentIterations = %xmm6
 SIMD_MaximumIterations = %xmm7
 SIMD_onePerLaneUint63 = %xmm8
 SIMD_EscapeSquared = %xmm10
-// SIMD_DoubleTwoDoubles = %xmm12
 
-// OFFSET_XSTARTS = 0
-// OFFSET_YSTARTS = 16
-// OFFSET_XCURRENTS = 32
-// OFFSET_YCURRENTS = 48
-// OFFSET_CURRENTITERATIONS = 64
-// OFFSET_MAXIMUMITERATIONS = 72
 
 # Macros
 
@@ -47,35 +40,6 @@ checkInputLength:
   mov %rax, %rdi # Store successfully read byte count into potential exit value, if it doesn't turn out to match $JOBLENGTH.
   cmp $JOBLENGTH, %al # al is LSB of rax: did we read EXACTLY the number of bytes we wanted?
   jne goodEnd # If not, then bail back to shell or other caller.
-
-// lookForFlushCode:
-//   leaq readWriteBuffer(%rip), %rdi # Store memory location into arg1 again
-//   leaq flushCode(%rip), %rsi # Store code to compare it against into arg2
-//   mov $JOBLENGTH, %ecx # Store length of string to compare
-//   cld # Clear direction flag, aka "crawl forwards through memory for this compare"
-//   repe cmpsb # Compare strings in memory
-
-//   # For now that just means skip the assertion checks.
-//   # Later it will also mean skip the calculations for this input,
-//   # and run all calculations for pending inputs, outputting them and then
-//   # last of all outputting a flush code of our own.
-//   jz _output # If strings are identical, treat this as a flush code.
-
-
-
-/*
-checkAssertions:
-  leaq CurrentIterations(%rip), %rax # address where both Uint31 "iterations" values are stored, one after the other.
-  movq (%rax), %rax # Load both Uint31 values into one 64-bit register
-  rorq $32, %rax # swap MaximumIterations into LSDW
-  testl $HIGH_32_BIT_MASK, %eax # Does LSDW have high bit set?
-  jnz MaximumIterationsMustHaveHighBitUnset
-  testl %eax, %eax # is LSDW currently zero?
-  jz MaximumIterationsMustBeLargerThanZero
-  rorq $32, %rax # swap CurrentIterations into LSDW
-  testl $HIGH_32_BIT_MASK, %eax # Does LSDW have high bit set?
-  jnz CurrentIterationsMustHaveHighBitUnset
-*/
 
 calculate:
 calculatePrep:
@@ -151,22 +115,9 @@ calculateInnerLoop:
 
 // Reached by bail condition from above
 calculateCleanup:
-  // XYstarts ought to never change in calculateInnerLoop
-  // movaps SIMD_Xstarts, Xstarts(%rip)
-  // movaps SIMD_Ystarts, Ystarts(%rip)
-
   movaps SIMD_Xcurrents, Xcurrents(%rip)
   movaps SIMD_Ycurrents, Ycurrents(%rip)
   movaps SIMD_CurrentIterations, CurrentIterations(%rip)
-  
-  // MaximumIterations ought to never change in calculateInnerLoop
-  // movaps SIMD_MaximumIterations, MaximumIterations(%rip)
-
-  // All of the below are constants loaded into registers only for convenience.
-  // movaps SIMD_onePerLaneUint63, onePerLaneUint63(%rip)
-  // movaps SIMD_EscapeSquared, EscapeSquared(%rip)
-
-
 
 output:
   putMemoryMacro messageLocation=readWriteBuffer(%rip),length=$JOBLENGTH
@@ -174,7 +125,7 @@ output:
 
 goodEnd:
   mov $60, %rax # systemExit code
-  // mov $0, %rdi # return code to caller: no errors to report
+  mov $0, %rdi # return code to caller: no errors to report
   syscall
 
 // badEnd:
@@ -182,34 +133,6 @@ goodEnd:
 //   mov $1, %rdi # return code to caller: something done borked, brah!
 //   syscall
 
-
-  // This would convert the length of successfully read input into decimal, then print that to stdout.
-  // mov %rax, %rdi # copy read byte count into arg1
-  // leaq messageBuffer(%rip), %rax # pointer to ascii decimal result buffer
-  // call unsignedIntegerToStringBase10
-  // mov %rax, %rdi # move memory location from ret1 into arg1
-  // mov %rdx, %rsi # move length from ret2 into arg2
-  // mov $STDOUT, %rdx # define recently vacated arg3
-  // call putMemoryProcedure
-  // putNewlineMacro
-
-  // This would print the contents of the read buffer to stdout.
-  // leaq readWriteBuffer(%rip), %rdi # move memory location into arg1
-  // mov %rbx, %rsi # move length from parent safe spot into arg2
-  // mov $STDOUT, %rdx # define recently vacated arg3
-  // call putMemoryProcedure
-  // putNewlineMacro
-
-/*
-MaximumIterationsMustHaveHighBitUnset:
-  softError message="MaximumIterations must have high bit unset"
-  
-MaximumIterationsMustBeLargerThanZero:
-  softError message="MaximumIterations must be larger than zero"
-
-CurrentIterationsMustHaveHighBitUnset:
-  softError message="CurrentIterations must have high bit unset"
-*/
 
 # Data
 
@@ -233,12 +156,6 @@ MaximumIterations:
   .skip XMMBYTESIZE
 onePerLaneUint63:
   .quad 1,1 
-// DoubleTwoDoubles:
-//   .double 2.0,2.0
 EscapeSquared:
   .double 4.0,4.0 
-// flushCode:
-//   .fill 40,1,0xFF
-// messageBuffer:
-//   .skip 256
 

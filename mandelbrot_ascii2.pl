@@ -405,39 +405,6 @@ sub drawSet
       my(@samples) = unpack(PACK_PALLET_CURRENT_ITERATIONS_ONLY, $childOutput);
       $childOutput = '';
 
-=pod
-## This is the old perl calc loop
-      foreach my $index (0..1)
-      { my($startY) = $startYs->[$index];
-        my($currentX, $currentY) = ($startX, $startY);
-        my $iterations = 1; # 0 is reserved post-processing for "inside the M set"
-
-        while
-        ( $iterations < $parameters->{maximumIterations}
-        &&$currentX*$currentX + $currentY*$currentY < 4
-        )
-        { $iterations++;
-          my $tempY = $currentY*$currentY;
-          my $tempX = $currentX*$currentX - $tempY + $startX;
-          $currentY = 2 * $currentX * $currentY + $startY;
-          $currentX = $tempX;
-        }
-
-        # This is a quick trick to make "maxint" results reset to zero,
-        # without changing any other valid output values.
-        $iterations %= $parameters->{maximumIterations};
-        $samples[$index] = $iterations;
-
-        # if($iterations>=$parameters->{maximumIterations})
-        # { print $mandelbrotInteriorCharacterA;
-        # }
-        # else
-        # { printCellA($iterations);
-        # }
-    # CORE::say("!$iterations!");
-      }
-=cut
-
       # This is a quick trick to make "maxint" results reset to zero,
       # without changing any other valid output values.
       foreach my $index (0..1)
@@ -466,29 +433,6 @@ sub hashMapValues
 
   \%output;
 }
-
-## printCellA is the first version: 1 sample per character, 5 color grayscale.
-## Caller used to print the mandelbrot special character directly.
-# Input: A single float
-# Side Effect: Output to terminal a single pseudographic from
-#   $pseudographicAlphebetA corresponding to that value such that
-#   as values get larger, the distance between color transitions widens
-#   exponentially.
-# No return output
-# sub printCellA
-# { my($cellValue) = shift;
-#   my($paletteLength) = length($pseudographicAlphebetA);
-
-#   if(abs($cellValue)<1e-6)
-#   { $cellValue = 0;
-#   }
-#   else
-#   { $cellValue = abs($cellValue)<1e-6?0:log($cellValue);
-#     $cellValue = $cellValue - floor($cellValue);
-#     $cellValue = floor($cellValue*$paletteLength);
-#   }
-#   print substr($pseudographicAlphebetA, $cellValue, 1);
-# }
 
 ## printCellB is the second version: 24 bit color support at 2 samples (2 unique colors) per character.
 ## Caller no longer prints the mandelbrot special character directly.
@@ -648,9 +592,7 @@ sub getLanes
 }
 
 sub resetScreen()
-{ #print Dumper($parameters->{viewPortTextSize});
-  #sleep 5;
-  print $ANSIControlSequenceIntroducer, '2J', $ANSIControlSequenceIntroducer, '0;0H';
+{ print $ANSIControlSequenceIntroducer, '2J', $ANSIControlSequenceIntroducer, '0;0H';
 }
 sub resetColors() { print $ANSIControlSequenceIntroducer, '0m'; }
 sub mouseClickTrackingStart() { print $ANSIControlSequenceIntroducer, '?9h', $ANSIControlSequenceIntroducer, '?1015h'; }

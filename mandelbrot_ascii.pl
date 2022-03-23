@@ -1,6 +1,11 @@
 #!/bin/perl -CS
 
 ##### Current Status
+# This version uses the SIMD engine.
+# Since perl algo is faster for shallow zooms, I'm setting a maximumiteration
+# threshold below which Perl algo will be used, and above which
+# SIMD engine will get used.
+#############
 # CLI arguments:
 # * [viewportCenterX default -0.5]
 # * [viewportCenterY default 0]
@@ -75,20 +80,39 @@ use Data::Dumper;
 use POSIX qw(floor);
 use feature 'unicode_strings';
 use utf8;
-use constant { TRUE => 1, FALSE => 0 };
+use constant
+{ TRUE => 1
+, FALSE => 0
+, PACK_JOB_BYTES => 48
+, PACK_PALLET_FORMAT => 'ddddddddVx4Vx4Vx4Vx4'
+, PACK_PALLET_CURRENT_ITERATIONS_ONLY => 'x64Vx4V'
+, PACKED_31BIT_INT => 'V'
+};
 use IO::Select;
 use IO::Handle;
 use JSON;
+use IPC::Run qw( start pump finish timeout );
 die unless STDIN->blocking(0); # Turn off input buffering
 $|++; # Turn off output buffering
 binmode(STDIN);
 
-my($pseudographicAlphebetA) = " ░▒▓█";
-my($mandelbrotInteriorCharacterA) = "☰";
 my($pseudographicAlphebetB) = "▀";
 my($ANSIControlSequenceIntroducer) = "\e[";
 my($TAB) = "\t";
 my($parameters) = {};
+my(@SIMDengine) = qw(./mandelbrot_point.elf64);
+my($childInput, $childOutput, $childError, $timer, $childProcess);
+my($timeoutInterval) = 0.3;
+
+# Only accepting 2 for now, because my pallet packing
+# strategy is currently brittle expecting that lane count.
+my($ACCEPTABLE_LANE_CONFIGS) =
+{ 2 => 1 # SSE42
+# , 1 => 1 # Scalar only? It might be good for testing or something, I'unno.
+# , 4 => 1 # AVX1/2
+# , 8 => 1 # AVX512
+# , 16 => 1 # AVX1024?
+};
 
 # Routine to perform terminal cleanup before ending program,
 # Especially in case of an interrupt!
@@ -102,10 +126,27 @@ sub end
   , $TAB, $parameters->{viewPortCenterY}
   , $TAB, $parameters->{viewPortHeight}
   , $TAB, $parameters->{maximumIterations}
+  , $TAB, $parameters->{engineThreshold}
   );
-  exit;
+  die($_[0]) if(defined($_[0]) && $_[0] ne 'INT');
+  exit 0;
 }
 $SIG{INT} = \&end; # Make sure Ctrl-C flows through cleanup
+
+$childProcess = spawn();
+my($ACTIVE_LANES) = getLanes();
+end
+( "Received this from engine instead of lanes data:"
+. '('. unpack("H*", $childOutput) .')'
+. " Child reported error:($childError)"
+)
+unless
+( defined($ACTIVE_LANES)
+&&!!$ACCEPTABLE_LANE_CONFIGS->{$ACTIVE_LANES}
+);
+
+$childOutput = $childError = '';
+
 
 sub setParameters
 { my $newParameters = {@_};
@@ -120,16 +161,12 @@ sub setParameters
   # circles that were 5% too tall.
   # So final adjustment was eyeballed.
   $parameters =
-  # { ( aspectRatio => $parameters->{aspectRatio} || 1.9
-  #   , viewPortCenterX => $parameters->{viewPortCenterX} || -0.5
-  #   , viewPortCenterY => $parameters->{viewPortCenterY} || 0
-  #   , viewPortHeight => $parameters->{viewPortHeight} || 4
-  #   , maximumIterations => $parameters->{maximumIterations} || 1e2
   { ( aspectRatio => 1.9
     , viewPortCenterX => -0.5
     , viewPortCenterY => 0
     , viewPortHeight => 4
-    , maximumIterations => 1e2
+    , maximumIterations => 100
+    , engineThreshold => 3000
     , %$parameters
     , %$newParameters
     )
@@ -305,8 +342,6 @@ while(1)
   }
 }
 
-
-
 sub drawSet
 { resetScreen();
   my($startYindex) = $parameters->{viewPortTextSize}{y};
@@ -330,33 +365,73 @@ sub drawSet
         , $parameters->{viewPortTextSize}{x} - $startXindex + 1
         );
       my(@samples) = (0,0);
-      
-      foreach my $index (0..1)
-      { my($startY) = $startYs->[$index];
-        my($currentX, $currentY) = ($startX, $startY);
-        my $iterations = 1; # 0 is reserved post-processing for "inside the M set"
-        while
-        ( $iterations < $parameters->{maximumIterations}
-        &&$currentX*$currentX + $currentY*$currentY < 4
-        )
-        { $iterations++;
-          my $tempY = $currentY*$currentY;
-          my $tempX = $currentX*$currentX - $tempY + $startX;
-          $currentY = 2 * $currentX * $currentY + $startY;
-          $currentX = $tempX;
-        }
+
+      # Deep zoom?
+      if($parameters->{maximumIterations} > $parameters->{engineThreshold})
+      { # Yes: Then use SIMD ASM engine.
+        $childInput =
+          pack
+          ( PACK_PALLET_FORMAT
+          , $startX, $startX
+          , $startYs->[0], $startYs->[1]
+          , $startX, $startX
+          , $startYs->[0], $startYs->[1]
+          , 1, 1
+          , $parameters->{maximumIterations}, $parameters->{maximumIterations}
+          );
+
+        $timer->start($timeoutInterval);
+        eval
+        { $childProcess->pump() while length $childInput;
+        };
+        end($@) if($@);
+
+        end
+        ( 'didn\'t get a proper sized pallet back. '
+        . 'Instead, got '. length($childOutput) .' bytes:'
+        . unpack('H*', $childOutput)
+        ) unless(length($childOutput) == 96);
+          
+        end("Child reported the following error: $childError")
+          unless(length($childError) == 0);
+          
+        @samples = unpack(PACK_PALLET_CURRENT_ITERATIONS_ONLY, $childOutput);
+        $childOutput = '';
+
         # This is a quick trick to make "maxint" results reset to zero,
         # without changing any other valid output values.
-        $iterations %= $parameters->{maximumIterations};
-        $samples[$index] = $iterations;
+        foreach my $index (0..1)
+        { $samples[$index] %= $parameters->{maximumIterations};
+        }
+      }
+      else # No: Then use pure perl engine (no IPC bottleneck per pixel)
+      { foreach my $index (0..1)
+        { my($startY) = $startYs->[$index];
+          my($currentX, $currentY) = ($startX, $startY);
+          my $iterations = 1; # 0 is reserved post-processing for "inside the M set"
+          while
+          ( $iterations < $parameters->{maximumIterations}
+          &&$currentX*$currentX + $currentY*$currentY < 4
+          )
+          { $iterations++;
+            my $tempY = $currentY*$currentY;
+            my $tempX = $currentX*$currentX - $tempY + $startX;
+            $currentY = 2 * $currentX * $currentY + $startY;
+            $currentX = $tempX;
+          }
+          # This is a quick trick to make "maxint" results reset to zero,
+          # without changing any other valid output values.
+          $iterations %= $parameters->{maximumIterations};
+          $samples[$index] = $iterations;
 
-        # if($iterations>=$parameters->{maximumIterations})
-        # { print $mandelbrotInteriorCharacterA;
-        # }
-        # else
-        # { printCellA($iterations);
-        # }
-    # CORE::say("!$iterations!");
+          # if($iterations>=$parameters->{maximumIterations})
+          # { print $mandelbrotInteriorCharacterA;
+          # }
+          # else
+          # { printCellA($iterations);
+          # }
+      # CORE::say("!$iterations!");
+        }
       }
       printCellB(@samples);
     }
@@ -381,29 +456,6 @@ sub hashMapValues
 
   \%output;
 }
-
-## printCellA is the first version: 1 sample per character, 5 color grayscale.
-## Caller used to print the mandelbrot special character directly.
-# Input: A single float
-# Side Effect: Output to terminal a single pseudographic from
-#   $pseudographicAlphebetA corresponding to that value such that
-#   as values get larger, the distance between color transitions widens
-#   exponentially.
-# No return output
-# sub printCellA
-# { my($cellValue) = shift;
-#   my($paletteLength) = length($pseudographicAlphebetA);
-
-#   if(abs($cellValue)<1e-6)
-#   { $cellValue = 0;
-#   }
-#   else
-#   { $cellValue = abs($cellValue)<1e-6?0:log($cellValue);
-#     $cellValue = $cellValue - floor($cellValue);
-#     $cellValue = floor($cellValue*$paletteLength);
-#   }
-#   print substr($pseudographicAlphebetA, $cellValue, 1);
-# }
 
 ## printCellB is the second version: 24 bit color support at 2 samples (2 unique colors) per character.
 ## Caller no longer prints the mandelbrot special character directly.
@@ -542,6 +594,24 @@ sub cellToPlane
 sub fmod
 { my($dividend) = $_[0]/$_[1];
   $_[1] * ($dividend - floor($dividend));
+}
+
+# Returns handle to child process
+sub spawn
+{ start
+  ( \@SIMDengine
+  , '<', \$childInput
+  , '>', \$childOutput
+  , '2>', \$childError
+  , ( $timer = timeout $timeoutInterval )
+  );
+}
+
+# This learns how many lanes to prepare per job pallet
+sub getLanes
+{ $childInput = '';
+  $childProcess->pump();
+  unpack(PACKED_31BIT_INT, $childOutput);
 }
 
 sub resetScreen() { print $ANSIControlSequenceIntroducer, '2J', $ANSIControlSequenceIntroducer, '0;0H'; }

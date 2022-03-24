@@ -136,6 +136,7 @@ sub end
   exit 0;
 }
 $SIG{INT} = \&end; # Make sure Ctrl-C flows through cleanup
+$SIG{WINCH} = sub {setParameters();}; # detect screen size change
 
 $childProcess = spawn();
 my($ACTIVE_LANES) = getLanes();
@@ -230,6 +231,7 @@ my($inputCommands) =
 , qr(^\[) => 'DECREASE MAXIMUM ITERATIONS'
 , qr(^0) => 'RESET VIEW'
 , qr(^\)) => 'DEFAULT VIEW'
+, qr(^r) => 'REFRESH'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EA) => 'UP'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EB) => 'DOWN'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EC) => 'RIGHT'
@@ -250,6 +252,7 @@ while(1)
 
   REPEAT_INPUT:
   my(@result) = acceptInput();
+  
   if($result[0] eq 'QUIT') # Primary program exit
   { end() }
   elsif($result[0] eq 'ZOOM IN')
@@ -341,8 +344,12 @@ while(1)
     , viewPortHeight => $parameters->{viewPortHeight} / $zoom
     );
   }
+  elsif($result[0] eq 'REFRESH' || $result[0] eq '1')
+  { # do .. nothing mebe?
+  }
   else
-  { print "Bad input, trying again..";
+  { CORE::say STDERR "Bad input, trying again..";
+end(Dumper(\@result));
     goto REPEAT_INPUT;
   }
 }

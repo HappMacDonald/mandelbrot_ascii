@@ -81,7 +81,7 @@ use warnings;
 # use diagnostics -verbose;
 # use Curses;
 use Data::Dumper;
-use POSIX qw(floor);
+use POSIX qw(floor strftime);
 use feature 'unicode_strings';
 use utf8;
 use constant
@@ -96,6 +96,7 @@ use IO::Select;
 use IO::Handle;
 use JSON;
 use IPC::Run qw( start pump finish timeout );
+use Time::HiRes qw(sleep);
 die unless STDIN->blocking(0); # Turn off input buffering
 $|++; # Turn off output buffering
 binmode(STDIN);
@@ -105,7 +106,7 @@ my($ANSIControlSequenceIntroducer) = "\e[";
 my($TAB) = "\t";
 my($parameters) = {};
 my(@SIMDengine) = qw(./mandelbrot_point.elf64);
-my($childInput, $childOutput, $childError, $timer, $childProcess);
+my($SIMDInput, $SIMDOutput, $SIMDError, $SIMDTimer, $SIMDProcess);
 my($timeoutInterval) = 0.3;
 
 # Only accepting 2 for now, because my pallet packing
@@ -138,19 +139,27 @@ sub end
 $SIG{INT} = \&end; # Make sure Ctrl-C flows through cleanup
 $SIG{WINCH} = sub {setParameters();}; # detect screen size change
 
-$childProcess = spawn();
+$SIMDProcess
+= start
+  ( \@SIMDengine
+  , '<', \$SIMDInput
+  , '>', \$SIMDOutput
+  , '2>', \$SIMDError
+  , ( $SIMDTimer = timeout $timeoutInterval )
+  );
+
 my($ACTIVE_LANES) = getLanes();
 end
 ( "Received this from engine instead of lanes data:"
-. '('. unpack("H*", $childOutput) .')'
-. " Child reported error:($childError)"
+. '('. unpack("H*", $SIMDOutput) .')'
+. " Child reported error:($SIMDError)"
 )
 unless
 ( defined($ACTIVE_LANES)
 &&!!$ACCEPTABLE_LANE_CONFIGS->{$ACTIVE_LANES}
 );
 my($PALLET_SIZE) = PACK_JOB_BYTES * $ACTIVE_LANES;
-$childInput = $childOutput = $childError = '';
+$SIMDInput = $SIMDOutput = $SIMDError = '';
 
 
 sub setParameters
@@ -161,17 +170,13 @@ sub setParameters
       unless defined $newParameters->{$key};
   }
 
-  # my font is 12px wide 24px tall
-  # But testing with aspectRatio = 2 still yielded
-  # circles that were 5% too tall.
-  # So final adjustment was eyeballed.
   $parameters =
-  { ( aspectRatio => 1.9
-    , viewPortCenterX => -0.5
+  { ( viewPortCenterX => -0.5
     , viewPortCenterY => 0
     , viewPortHeight => 4
-    , maximumIterations => 100
-    , engineThreshold => 1599
+    , maximumIterations => 5e4
+    # , engineThreshold => 1599
+    , engineThreshold => 0
     , %$parameters
     , %$newParameters
     )
@@ -190,6 +195,14 @@ sub setParameters
 #   )
 # );
 
+  $parameters->{viewPortTextSize} =
+  { x => 0+`tput cols`
+  , y => 0+`tput lines`
+  };
+  $parameters->{aspectRatio}
+  = $parameters->{viewPortTextSize}{x}
+  / $parameters->{viewPortTextSize}{y}
+  / 2;
   $parameters->{viewPortCenter} =
     { x => $parameters->{viewPortCenterX}
     , y => $parameters->{viewPortCenterY}
@@ -208,11 +221,6 @@ sub setParameters
   # { x => 79#`tput cols`
   # , y => 23#`tput lines`-2
   # };
-  $parameters->{viewPortTextSize} =
-  { x => 0+`tput cols`
-  , y => 0+`tput lines`
-  };
-
 # die(Dumper($parameters));
 }
 setParameters
@@ -232,6 +240,8 @@ my($inputCommands) =
 , qr(^0) => 'RESET VIEW'
 , qr(^\)) => 'DEFAULT VIEW'
 , qr(^r) => 'REFRESH'
+, qr(^c) => 'CLEAR'
+, qr(^s) => 'SAVE_IMAGE'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EA) => 'UP'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EB) => 'DOWN'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EC) => 'RIGHT'
@@ -333,19 +343,32 @@ while(1)
     { $zoom = 33; } # zoom in 33x
     setParameters
     ( viewPortCenterX =>
-        cellToPlane('x', $result[2], TRUE)
+        cellToPlane('x', $result[2])
     , viewPortCenterY =>
         cellToPlane
         ( 'y'
           # Mirror input vertically
         , $parameters->{viewPortTextSize}{y} - $result[3]
-        , TRUE
         )
     , viewPortHeight => $parameters->{viewPortHeight} / $zoom
     );
   }
   elsif($result[0] eq 'REFRESH' || $result[0] eq '1')
-  { # do .. nothing mebe?
+  { # change no parameters, just roll into the oncoming redraw.
+  }
+  elsif($result[0] eq 'CLEAR')
+  { # change no parameters, manually clear screen and then skip the redraw.
+    resetScreen();
+    # end("!");
+    goto REPEAT_INPUT;
+  }
+  elsif($result[0] eq 'SAVE_IMAGE')
+  { # change no parameters
+    topleftScreen();
+    CORE::say "Saving image, please wait ...";
+    drawSetToImage();
+    CORE::say "Image save completed. :D";
+    goto REPEAT_INPUT;
   }
   else
   { CORE::say STDERR "Bad input, trying again..";
@@ -354,8 +377,166 @@ end(Dumper(\@result));
   }
 }
 
+sub drawSetToImage
+{ # my $imageWidth = $parameters->{viewPortTextSize}{x};
+  my $imageWidth = 7650; # 17" @ 450dpi
+  # my $imageHeight = $parameters->{viewPortTextSize}{y}*2;
+  my $imageHeight = 4950; # 11" @ 450dpi
+  my $aspectRatio = $imageWidth / $imageHeight;
+  my $imageIgnore;
+  my $imageInput = '';
+  my $SIMDBuffer = '';
+  my $imageProcess
+  = start
+    ( [qw(/usr/bin/pnmtopng -compression 0)]
+    , '<', \$imageInput
+    , '>', 'images/image '. sprintISO8601ToMinuteNoColon() .'.png'
+    , '2>', \$imageIgnore
+    );
+
+  $imageInput = "P6 $imageWidth $imageHeight 255\n";
+
+  my($startYindex) = $imageHeight/2;
+  my($topOfScreen) = TRUE;
+  my($engine) = 'SIMD';
+    # ( $parameters->{maximumIterations}
+    # > $parameters->{engineThreshold}
+    # )?'SIMD'
+    # : 'PERL';
+  my($samplesRowA) = '';
+  my($samplesRowB) = '';
+
+  while($startYindex-- >0)
+  { unless($topOfScreen)
+    { $imageInput .= $samplesRowA . $samplesRowB;
+      $samplesRowA = $samplesRowB = '';
+    }
+    $topOfScreen = FALSE;
+
+    $SIMDInput = $SIMDOutput = $SIMDError = $SIMDBuffer = '';
+
+    # Two samples per character
+    my($startYs) =
+    [ cellToPlane('y', $startYindex+0.25, $imageHeight/2, $aspectRatio)
+    , cellToPlane('y', $startYindex-0.25, $imageHeight/2, $aspectRatio)
+    ];
+    my($startXindex) = $imageWidth;
+    while($startXindex-- > 0)
+    { my($startX)
+      = cellToPlane
+        ( 'x'
+        , $imageWidth - $startXindex + 1
+        , $imageWidth
+        , $aspectRatio
+        );
+      my(@samples) = (0,0);
+
+      $SIMDBuffer
+      .=pack
+        ( PACK_PALLET_FORMAT
+        , $startX, $startX
+        , $startYs->[0], $startYs->[1]
+        , $startX, $startX
+        , $startYs->[0], $startYs->[1]
+        , 1, 1
+        , $parameters->{maximumIterations}, $parameters->{maximumIterations}
+        );
+    }
+    # Extra step for SIMD: don't calculate & write until the end of each row.
+    $startXindex = $imageWidth;
+
+    my($pallets) = $imageWidth;
+# CORE::say STDERR encode_json([when => 'before', childOutputLength => length($SIMDOutput), childInputLength => length($SIMDInput)]);
+
+# CORE::say "[". length($SIMDBuffer);
+    while($pallets)
+    {
+# print ".";
+      $SIMDInput = substr($SIMDBuffer, 0, 32*$PALLET_SIZE, '')
+        if(!length($SIMDInput));
+      eval
+      { until(length($SIMDOutput)>=$PALLET_SIZE)
+        { $SIMDTimer->start($timeoutInterval);
+          $SIMDProcess->pump();
+          sleep 0.01;
+        }
+      };
+      end
+      ( "SIMDprocess borked:"
+      . "\n". length($@)
+      . "\n". length($SIMDInput)
+      . "\n". length($SIMDBuffer)
+      . "\n". $pallets
+      . "\n". $startYindex
+      . "\n{{$@}}"
+      ) if($@);
+      my($pallet) = substr($SIMDOutput, 0, $PALLET_SIZE, '');
+      $pallets--;
+# CORE::say STDERR encode_json([when => 'after', palletLength => length($pallet), childOutputLength => length($SIMDOutput), childInputLength => length($SIMDInput)]);
+
+      end("Child reported the following error: $SIMDError")
+        unless(length($SIMDError) == 0);
+      
+      my(@samples) = unpack(PACK_PALLET_CURRENT_ITERATIONS_ONLY, $pallet);
+
+      # This is a quick trick to make "maxint" results reset to zero,
+      # without changing any other valid output values.
+      foreach my $index (0..1)
+      { $samples[$index] %= $parameters->{maximumIterations};
+      }
+
+      # $ANSIRow .= sprintCellB(@samples);
+      $samplesRowA .= sprintRGBCell($samples[0]);
+      $samplesRowB .= sprintRGBCell($samples[1]);
+    }
+    resetColors();
+    # CORE::say "?";
+    printf("\r%4.1f%%", (($imageHeight/2)-$startYindex)/($imageHeight/2)*100);
+    # end("row");
+  }
+  
+  $imageInput .= $samplesRowA . $samplesRowB;
+  $samplesRowA = $samplesRowB = '';
+
+  # resetColors();
+  select()->flush();
+  until(!length($imageInput))
+  { $imageProcess->pump();
+    sleep 0.01;
+  }
+  $imageProcess->finish() or end("pnmtopng returned $?: $imageIgnore");
+}
+
 sub drawSet
 { resetScreen();
+  my $thumbWidth = $parameters->{viewPortTextSize}{x};
+  my $thumbHeight = $parameters->{viewPortTextSize}{y}*2;
+  # open(my $thumbnailProcess, '>', 'thumbnail.ppm');
+  my $thumbIgnore;
+  my $thumbnailInput = '';
+  my $thumbnailProcess
+  = start
+    ( [qw(/usr/bin/pnmtopng -compression 0)]
+    , '<', \$thumbnailInput
+    , '>', 'images/thumbnail '. sprintISO8601ToMinuteNoColon() .'.png'
+    , '2>', \$thumbIgnore
+    );
+
+
+=pod
+  print $thumbnailProcess <<"ENDHEADER";
+P7
+WIDTH $thumbWidth
+HEIGHT $thumbHeight
+DEPTH 3
+MAXVAL 255
+TUPLTYPE RGB
+ENDHDR
+ENDHEADER
+=cut
+
+  $thumbnailInput = "P6 $thumbWidth $thumbHeight 255\n";
+
   my($startYindex) = $parameters->{viewPortTextSize}{y};
   my($topOfScreen) = TRUE;
   my($engine) =
@@ -363,13 +544,23 @@ sub drawSet
     > $parameters->{engineThreshold}
     )?'SIMD'
     : 'PERL';
+  my($ANSIRow) = '';
+  my($samplesRowA) = '';
+  my($samplesRowB) = '';
 
   while($startYindex-- >0)
   { resetColors();
-    print "\n" unless $topOfScreen;
+    unless($topOfScreen)
+    { #CORE::say $ANSIRow;
+      # $ANSIRow .= "\n";
+      printRow($ANSIRow, $samplesRowA, $samplesRowB, $thumbnailInput);
+      print "\n";
+      $samplesRowA = $samplesRowB = '';
+    }
+    $ANSIRow = '';
     $topOfScreen = FALSE;
 
-    $childInput = $childOutput = $childError = '';
+    $SIMDInput = $SIMDOutput = $SIMDError = '';
 
     # Two samples per character
     my($startYs) =
@@ -386,7 +577,7 @@ sub drawSet
       my(@samples) = (0,0);
 
       if($engine eq 'SIMD')
-      { $childInput .=
+      { $SIMDInput .=
           pack
           ( PACK_PALLET_FORMAT
           , $startX, $startX
@@ -417,7 +608,9 @@ sub drawSet
           $iterations %= $parameters->{maximumIterations};
           $samples[$index] = $iterations;
         }
-        printCellB(@samples);
+        $ANSIRow .= sprintCellB(@samples);
+        $samplesRowA .= sprintRGBCell($samples[0]);
+        $samplesRowB .= sprintRGBCell($samples[1]);
       }
     }
     # Extra step for SIMD: don't calculate & write until the end of each row.
@@ -425,18 +618,18 @@ sub drawSet
     { $startXindex = $parameters->{viewPortTextSize}{x};
 
       while($startXindex --> 0)
-      { my($pallet);
-# CORE::say STDERR encode_json([when => 'before', childOutputLength => length($childOutput), childInputLength => length($childInput)]);
-        $timer->start($timeoutInterval);
+      { 
+# CORE::say STDERR encode_json([when => 'before', childOutputLength => length($SIMDOutput), childInputLength => length($SIMDInput)]);
+        $SIMDTimer->start($timeoutInterval);
         eval
-        { $childProcess->pump() until(length($childOutput)>=$PALLET_SIZE);
+        { $SIMDProcess->pump() until(length($SIMDOutput)>=$PALLET_SIZE);
         };
         end($@) if($@);
-        $pallet = substr($childOutput, 0, $PALLET_SIZE, '');
-# CORE::say STDERR encode_json([when => 'after', palletLength => length($pallet), childOutputLength => length($childOutput), childInputLength => length($childInput)]);
+        my($pallet) = substr($SIMDOutput, 0, $PALLET_SIZE, '');
+# CORE::say STDERR encode_json([when => 'after', palletLength => length($pallet), childOutputLength => length($SIMDOutput), childInputLength => length($SIMDInput)]);
 
-        end("Child reported the following error: $childError")
-          unless(length($childError) == 0);
+        end("Child reported the following error: $SIMDError")
+          unless(length($SIMDError) == 0);
         
         my(@samples) = unpack(PACK_PALLET_CURRENT_ITERATIONS_ONLY, $pallet);
 
@@ -446,15 +639,32 @@ sub drawSet
         { $samples[$index] %= $parameters->{maximumIterations};
         }
 
-        printCellB(@samples);
+        $ANSIRow .= sprintCellB(@samples);
+        $samplesRowA .= sprintRGBCell($samples[0]);
+        $samplesRowB .= sprintRGBCell($samples[1]);
       }
     }
     # end("row");
   }
+  printRow($ANSIRow, $samplesRowA, $samplesRowB, $thumbnailInput);
+  $samplesRowA = $samplesRowB = '';
 
   resetColors();
   select()->flush();
+  $thumbnailProcess->pump until !length($thumbnailInput);
+  $thumbnailProcess->finish() or end("pnmtopng returned $?");
 }
+
+sub printRow
+{ my($ANSIRow) = shift;
+  my($samplesRowA) = shift;
+  my($samplesRowB) = shift;
+
+  print substr($ANSIRow, 0, 100, '') while $ANSIRow;
+  # print $thumbnailProcess $samplesRowA, $samplesRowB;
+  $_[0] .= $samplesRowA . $samplesRowB;
+}
+
 
 # input: anonymous function and a hash reference
 # A new hash reference with the same keys is created,
@@ -472,94 +682,107 @@ sub hashMapValues
   \%output;
 }
 
-## printCellB is the second version: 24 bit color support at 2 samples (2 unique colors) per character.
-## Caller no longer prints the mandelbrot special character directly.
+## sprintCellB 24 bit color support at 2 samples (2 unique colors) per character.
 # Input: A single float representing iterations of top sample, then another representing bottom.
-# Side Effect: Output to terminal a "half-upper-block" character
+# Return: a string including a "half-upper-block" character
 #   aka $pseudographicAlphebetB backed by foreground and background
 #   color setting codes.
-# No return output
-sub printCellB
+# No side effects
+sub sprintCellB
 { my($cellValues) = [@_];
   my($inputSwatchesMapToANSICommandCode) = [38, 48];
+  my($ret) = '';
 
   foreach my $swatchIndex (0..1)
-  { my($redChannel, $greenChannel, $blueChannel) = (0,0,0);
-    my($cellValue) = $cellValues->[$swatchIndex];
+  { my($redChannel, $greenChannel, $blueChannel)
+    = samplesToRGB255($cellValues->[$swatchIndex]);
 
-# CORE::say "\nRaw cellValue = $cellValue";
-  
-    if(abs($cellValue)>1e-6) # else keep default black color
-    { #This converts the integer "0 < number of iterations < Max iter" value
-      #into a float representing a hue from 0 to 1, with logarithmic falloff
-      #(as input gets larger, hue spins more slowly)
-      $cellValue =
-        abs($cellValue)<1e-6
-        ? 0
-        # : log($cellValue+3)/log(3.33333);
-        : ($cellValue+3) ** 0.2;
+    $ret .=
+      join ''
+      , ( $ANSIControlSequenceIntroducer, $inputSwatchesMapToANSICommandCode->[$swatchIndex]
+        , ';2'
+        , ';', $redChannel
+        , ';', $greenChannel
+        , ';', $blueChannel
+        , 'm'
+        );
+  }
+  $ret . $pseudographicAlphebetB;
+}
 
-      $cellValue = $cellValue - floor($cellValue);
+sub sprintRGBCell
+{ pack("CCC", samplesToRGB255(shift));
+}
+
+sub samplesToRGB255
+{ my($redChannel, $greenChannel, $blueChannel) = (0,0,0);
+  my($cellValue) = shift;
+
+  if(abs($cellValue)>1e-6) # else keep default black color
+  { #This converts the integer "0 < number of iterations < Max iter" value
+    #into a float representing a hue from 0 to 1, with logarithmic falloff
+    #(as input gets larger, hue spins more slowly)
+    $cellValue =
+      abs($cellValue)<1e-6
+      ? 0
+      # : log($cellValue+3)/log(3.33333);
+      : ($cellValue+3) ** 0.2;
+
+    $cellValue = $cellValue - floor($cellValue);
 
 # CORE::say "Cooked cellValue = $cellValue";
 
-      #This is scaled so that hue is 0..6, helps some of the math below.
-      my $hueZeroToSix = $cellValue*6;
+    #This is scaled so that hue is 0..6, helps some of the math below.
+    my $hueZeroToSix = $cellValue*6;
 # CORE::say "hueZeroToSix = $hueZeroToSix";
 
-      # Original algorithm took hue + value + saturation,
-      # but we know inside this if statement that we'll only ever work with
-      # a value and saturation that both equal 1.
-      # Thus the normally precomputed "chroma" = 1 and "antichroma" = 0,
-      # and those have both been simplified clean out of the below equations.
-      # --
-      # On a scale of 0 to 1, how far is this hue away from one of
-      # the three primary hues? R/G/B all yield 0, C/M/Y all yield 1,
-      # and every hue between yields the LINEAR interpolation.
-      my $huePrimaryDeviation = 1-abs(fmod($hueZeroToSix, 2) - 1);
+    # Original algorithm took hue + value + saturation,
+    # but we know inside this if statement that we'll only ever work with
+    # a value and saturation that both equal 1.
+    # Thus the normally precomputed "chroma" = 1 and "antichroma" = 0,
+    # and those have both been simplified clean out of the below equations.
+    # --
+    # On a scale of 0 to 1, how far is this hue away from one of
+    # the three primary hues? R/G/B all yield 0, C/M/Y all yield 1,
+    # and every hue between yields the LINEAR interpolation.
+    my $huePrimaryDeviation = 1-abs(fmod($hueZeroToSix, 2) - 1);
 # CORE::say "huePrimaryDeviation = $huePrimaryDeviation";
 
-      # All color channels initialized to zero
-      # , so color channels not mentioned in each stanza
-      # will remain zero.
-      if($hueZeroToSix<1) # Full red, variable green
-      { $redChannel = 1;
-        $greenChannel = $huePrimaryDeviation;
-      }
-      elsif($hueZeroToSix<2) # variable red, full green
-      { $redChannel = $huePrimaryDeviation;
-        $greenChannel = 1;
-      }
-      elsif($hueZeroToSix<3) # full green, variable blue
-      { $greenChannel = 1;
-        $blueChannel = $huePrimaryDeviation;
-      }
-      elsif($hueZeroToSix<4) # variable green, full blue
-      { $greenChannel = $huePrimaryDeviation;
-        $blueChannel = 1;
-      }
-      elsif($hueZeroToSix<5) # full blue, variable red
-      { $blueChannel = 1;
-        $redChannel = $huePrimaryDeviation;
-      }
-      else # variable blue, full red
-      { $blueChannel = $huePrimaryDeviation;
-        $redChannel = 1;
-      }
+    # All color channels initialized to zero
+    # , so color channels not mentioned in each stanza
+    # will remain zero.
+    if($hueZeroToSix<1) # Full red, variable green
+    { $redChannel = 1;
+      $greenChannel = $huePrimaryDeviation;
     }
-    #else keep default black color
-    #end if
-
-    print
-    ( $ANSIControlSequenceIntroducer, $inputSwatchesMapToANSICommandCode->[$swatchIndex]
-    , ';2'
-    , ';', floor(255*$redChannel)
-    , ';', floor(255*$greenChannel)
-    , ';', floor(255*$blueChannel)
-    , 'm'
-    );
+    elsif($hueZeroToSix<2) # variable red, full green
+    { $redChannel = $huePrimaryDeviation;
+      $greenChannel = 1;
+    }
+    elsif($hueZeroToSix<3) # full green, variable blue
+    { $greenChannel = 1;
+      $blueChannel = $huePrimaryDeviation;
+    }
+    elsif($hueZeroToSix<4) # variable green, full blue
+    { $greenChannel = $huePrimaryDeviation;
+      $blueChannel = 1;
+    }
+    elsif($hueZeroToSix<5) # full blue, variable red
+    { $blueChannel = 1;
+      $redChannel = $huePrimaryDeviation;
+    }
+    else # variable blue, full red
+    { $blueChannel = $huePrimaryDeviation;
+      $redChannel = 1;
+    }
   }
-  print $pseudographicAlphebetB;
+  #else keep default black color
+  #end if
+
+  ( floor(255*$redChannel)
+  , floor(255*$greenChannel)
+  , floor(255*$blueChannel)
+  );
 }
 
 sub acceptInput
@@ -594,15 +817,45 @@ sub acceptInput
 sub cellToPlane
 { my($axis) = shift;
   my($cellCoordinate) = shift;
-  my($debug) = shift;
+  my($resolution) = shift() || $parameters->{viewPortTextSize}{$axis};
+  my($aspectRatio) = shift() || $parameters->{aspectRatio};
+  my($viewPortHalf, $viewPortSize);
 
-  $parameters->{viewPortCenter}->{$axis}
-  - $parameters->{viewPortHalf}->{$axis}
-  + $cellCoordinate
-  * ( $parameters->{viewPortSize}->{$axis
-    } / $parameters->{viewPortTextSize}{$axis}
-    )
-  ;
+  if($axis eq 'x')
+  { $viewPortHalf = $parameters->{viewPortHalf}{x};
+    $viewPortSize = $parameters->{viewPortSize}{x};
+  }
+  else # presume $axis eq 'y'
+  { $viewPortHalf = $parameters->{viewPortHalf}{x}/$aspectRatio;
+    $viewPortSize = $parameters->{viewPortSize}{x}/$aspectRatio;
+  }
+
+  my($ret)
+  = $parameters->{viewPortCenter}->{$axis}
+    - $viewPortHalf
+    + $cellCoordinate
+    * ( $viewPortSize / $resolution
+      )
+    ;
+
+# end
+# ( Dumper
+#   ( [ $axis
+#     , $cellCoordinate
+#     , $resolution
+#     , $aspectRatio
+#     , $parameters->{viewPortHalf}{x}
+#     , $viewPortHalf
+#     , $parameters->{viewPortSize}{x}
+#     , $viewPortSize
+#     , $ret
+#     , $parameters
+#     ]
+#   )
+# );
+
+
+  $ret;
 }
 
 # Floating point modulo, with gravity to negative infinity.
@@ -611,25 +864,23 @@ sub fmod
   $_[1] * ($dividend - floor($dividend));
 }
 
-# Returns handle to child process
-sub spawn
-{ start
-  ( \@SIMDengine
-  , '<', \$childInput
-  , '>', \$childOutput
-  , '2>', \$childError
-  , ( $timer = timeout $timeoutInterval )
-  );
-}
-
 # This learns how many lanes to prepare per job pallet
 sub getLanes
-{ $childInput = '';
-  $childProcess->pump();
-  unpack(PACKED_31BIT_INT, $childOutput);
+{ $SIMDInput = '';
+  $SIMDProcess->pump();
+  unpack(PACKED_31BIT_INT, $SIMDOutput);
 }
 
-sub resetScreen() { print $ANSIControlSequenceIntroducer, '2J', $ANSIControlSequenceIntroducer, '0;0H'; }
-sub resetColors() { print $ANSIControlSequenceIntroducer, '0m'; }
-sub mouseClickTrackingStart() { print $ANSIControlSequenceIntroducer, '?9h', $ANSIControlSequenceIntroducer, '?1015h'; }
-sub mouseAllTrackingStop() { print $ANSIControlSequenceIntroducer, '?1000l'; }
+sub sprintISO8601ToMinuteNoColon
+{ my @now = localtime();
+  my $tz = strftime("%z", @now);
+  # $tz =~ s/(\d{2})(\d{2})/$1:$2/;
+
+  strftime("%Y-%m-%dT%H%M", @now) . $tz;
+}
+
+sub resetScreen { resetColors(); print $ANSIControlSequenceIntroducer, '2J'; topleftScreen(); }
+sub resetColors { print $ANSIControlSequenceIntroducer, 'm'; }
+sub topleftScreen { print $ANSIControlSequenceIntroducer, "0;0H"; }
+sub mouseClickTrackingStart { print $ANSIControlSequenceIntroducer, '?9h', $ANSIControlSequenceIntroducer, '?1015h'; }
+sub mouseAllTrackingStop { print $ANSIControlSequenceIntroducer, '?1000l'; }

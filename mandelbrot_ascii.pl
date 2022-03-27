@@ -518,7 +518,7 @@ sub drawSet
   = start
     ( [qw(/usr/bin/pnmtopng -compression 0)]
     , '<', \$thumbnailInput
-    , '>', 'images/thumbnail '. sprintISO8601ToMinuteNoColon() .'.png'
+    , '>', 'thumbnails/thumbnail '. sprintISO8601ToMinuteNoColon() .'.png'
     , '2>', \$thumbIgnore
     );
 

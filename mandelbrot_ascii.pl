@@ -124,9 +124,11 @@ my($ACCEPTABLE_LANE_CONFIGS) =
 sub end
 { mouseAllTrackingStop();
   resetColors();
+  topleftScreen(); # scrolling graphics slows down terminals. :P
   system("stty echo"); # Begin allow echoing input to the screen again
   CORE::say
-  ( 'Last viewed arguments, suitable for replay:'
+  ( "\n${ANSIControlSequenceIntroducer}2K"
+  , 'Last viewed arguments, suitable for replay:'
   , $TAB, $parameters->{viewPortCenterX}
   , $TAB, $parameters->{viewPortCenterY}
   , $TAB, $parameters->{viewPortHeight}
@@ -138,6 +140,14 @@ sub end
 }
 $SIG{INT} = \&end; # Make sure Ctrl-C flows through cleanup
 $SIG{WINCH} = sub {setParameters();}; # detect screen size change
+
+# Suppress input being displayed on the screen.
+# Currently our goal is to keep it off under
+# all circumstances, except temporarily when
+# typed input may be needed, and otherwise when
+# the script terminates via "end()".
+system("stty -icanon; stty -echo");
+mouseClickTrackingStart();
 
 $SIMDProcess
 = start

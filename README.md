@@ -10,17 +10,17 @@ What I learn here will help better inform how to continue building out the SIMD-
 Upon quitting, the application will try to output the settings last viewed to STDOUT, so that one can easily browse back to that location by feeding them back in as CLI arguments.
 
 Application will try to suit whatever screen size your terminal is currently in.
-If you resize your terminal window, unfortuantely as of this writing it will not notice the change until you perform the next draw command. But then it will.
+If you resize your terminal window, it will do its best to redraw to your new size.
 
 # Keyboard Control legend:
 * UP, DOWN, LEFT, RIGHT arrow keys: pan view port ~33% of its current height or width in any direction
-    (defaults to -0.5,0)
+    (center of screen defaults to -0.5,0)
 
 * + / -:  zoom in or out by 50%
     (viewport height defaults to 4 units)
 
-* [ / ]: Decrease / Increase maximum number of iterations by a factor of 4
-    (maximum iterations defaults to 100)
+* \[ / ]: Decrease / Increase maximum number of iterations by a factor of 4
+    (maximum iterations defaults to 50000)
 
 * q: quit
 

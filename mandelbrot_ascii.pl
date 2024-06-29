@@ -1,6 +1,21 @@
 #!/bin/perl -CS
 
 ##### Current Status
+# Good looking first place to try making a super small resolution animation
+# ./mandelbrot_ascii.pl '{"juliaParameterX":0, "juliaParameterY":1, "viewPortCenterY":0.33, "viewPortCenterX":-0.25, "viewPortHeight":1.25, "simpleJuliaTilt":0.41}'
+# Just need to do a bash loop or something to iterate over altering the "simpleJuliaTilt" from 0 to 1
+# maybe as a sigmoid? Maybe not (would hate to waste time on boring start/end
+#   when all of the action is in the middle)
+# Also need to work out a flag of some kind to force "save image, given size, quit".
+#
+#############
+# I want to pressgang this script into handling:
+# * Arbitrary rendering of 2D slices of the entire 4D julia space
+# * launching with parameters to simply render a single image and exit
+# ** With bespoke filename (not necessarily base directory though), image width, height, etc
+# * Maybe also animate multiple images with some way to describe
+#   which parameters will vary through the timeline, and how?
+#############
 # One thing I'd like to see is if the SIMD engine IPC bottleneck can be alleviated any.
 # I've confirmed that each pallet's IPC costs the same as roughly 65536 total iterations per pallet!
 # This imposes approximately 7-8 seconds of delay on ~144p images,
@@ -40,7 +55,7 @@
 # and set up some kind of interrupt handler/cleanup for:
 # `stty echo`, resetting color, turning off tracking, etc
 # to keep user's prompt from going all fubar.
-# 
+#
 # == To turn off any/all types of tracking mentioned above
 # CSI ?1000l
 #
@@ -94,7 +109,7 @@ use constant
 };
 use IO::Select;
 use IO::Handle;
-use JSON;
+use JSON qw( decode_json encode_json );
 use IPC::Run qw( start pump finish timeout );
 use Time::HiRes qw(sleep);
 die unless STDIN->blocking(0); # Turn off input buffering
@@ -129,11 +144,23 @@ sub end
   CORE::say
   ( "\n${ANSIControlSequenceIntroducer}2K"
   , 'Last viewed arguments, suitable for replay:'
-  , $TAB, $parameters->{viewPortCenterX}
-  , $TAB, $parameters->{viewPortCenterY}
-  , $TAB, $parameters->{viewPortHeight}
-  , $TAB, $parameters->{maximumIterations}
-  , $TAB, $parameters->{engineThreshold}
+  , $TAB
+  , encode_json
+    ( { viewPortCenterX   => $parameters->{viewPortCenterX}
+      , viewPortCenterY   => $parameters->{viewPortCenterY}
+      , viewPortHeight    => $parameters->{viewPortHeight}
+      , maximumIterations => $parameters->{maximumIterations}
+      , engineThreshold   => $parameters->{engineThreshold}
+      , simpleJuliaTilt   => $parameters->{simpleJuliaTilt}
+      , juliaParameterX   => $parameters->{juliaParameterX}
+      , juliaParameterY   => $parameters->{juliaParameterY}
+      }
+    )
+  # , $TAB, $parameters->{viewPortCenterX}
+  # , $TAB, $parameters->{viewPortCenterY}
+  # , $TAB, $parameters->{viewPortHeight}
+  # , $TAB, $parameters->{maximumIterations}
+  # , $TAB, $parameters->{engineThreshold}
   );
   die($_[0]) if(defined($_[0]) && $_[0] ne 'INT');
   exit 0;
@@ -187,10 +214,14 @@ sub setParameters
     , maximumIterations => 5e4
     # , engineThreshold => 1599
     , engineThreshold => 0
+    , simpleJuliaTilt => 0
+    , juliaParameterX => 0
+    , juliaParameterY => 0
     , %$parameters
     , %$newParameters
     )
   };
+
 
 # die
 # ( Dumper
@@ -233,13 +264,8 @@ sub setParameters
   # };
 # die(Dumper($parameters));
 }
-setParameters
-( viewPortCenterX => $ARGV[0]
-, viewPortCenterY => $ARGV[1]
-, viewPortHeight => $ARGV[2]
-, maximumIterations => $ARGV[3]
-, engineThreshold => $ARGV[4]
-);
+
+setParameters( $ARGV[0]?%{decode_json($ARGV[0])}:{} );
 
 my($inputCommands) =
 { qr(^(?:\x{4}|\x{1B}$|q)) => 'QUIT'
@@ -252,6 +278,7 @@ my($inputCommands) =
 , qr(^r) => 'REFRESH'
 , qr(^c) => 'CLEAR'
 , qr(^s) => 'SAVE_IMAGE'
+, qr(^S) => 'SUPER_SAVE_IMAGE'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EA) => 'UP'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EB) => 'DOWN'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EC) => 'RIGHT'
@@ -272,7 +299,7 @@ while(1)
 
   REPEAT_INPUT:
   my(@result) = acceptInput();
-  
+
   if($result[0] eq 'QUIT') # Primary program exit
   { end() }
   elsif($result[0] eq 'ZOOM IN')
@@ -293,12 +320,7 @@ while(1)
   { # Clear out all old values first
     # so that defaults will override previous ephemera.
     $parameters = {};
-    setParameters
-    ( viewPortCenterX => $ARGV[0]
-    , viewPortCenterY => $ARGV[1]
-    , viewPortHeight => $ARGV[2]
-    , maximumIterations => $ARGV[3]
-    );
+    setParameters( $ARGV[0]?%{decode_json($ARGV[0])}:{} );
   }
   elsif($result[0] eq 'DEFAULT VIEW') # Reset to ultimate defaults
   { # Clear out all old values first
@@ -376,7 +398,29 @@ while(1)
   { # change no parameters
     topleftScreen();
     CORE::say "Saving image, please wait ...";
-    drawSetToImage();
+    drawSetToImage
+    # ( 3840
+    # , 2160
+    # ( 1920
+    # , 1080
+    # ( 7650 # 17" @ 450dpi
+    # , 4950 # 11" @ 450dpi
+    ( 1920 # Standard HD
+    , 1080 #
+    );
+    CORE::say "Image save completed. :D";
+    goto REPEAT_INPUT;
+  }
+  elsif($result[0] eq 'SUPER_SAVE_IMAGE')
+  { # change no parameters
+    topleftScreen();
+    CORE::say "Saving HUGE image, please wait ...";
+    drawSetToImage
+    # ( 30600 # 17" @ 1800dpi
+    # , 19800 # 11" @ 1800dpi
+    ( 7650 # 17" @ 450dpi
+    , 4950 # 11" @ 450dpi
+    );
     CORE::say "Image save completed. :D";
     goto REPEAT_INPUT;
   }
@@ -388,10 +432,8 @@ end(Dumper(\@result));
 }
 
 sub drawSetToImage
-{ # my $imageWidth = $parameters->{viewPortTextSize}{x};
-  my $imageWidth = 7650; # 17" @ 450dpi
-  # my $imageHeight = $parameters->{viewPortTextSize}{y}*2;
-  my $imageHeight = 4950; # 11" @ 450dpi
+{ my $imageWidth = shift;
+  my $imageHeight = shift;
   my $aspectRatio = $imageWidth / $imageHeight;
   my $imageIgnore;
   my $imageInput = '';
@@ -444,8 +486,26 @@ sub drawSetToImage
       $SIMDBuffer
       .=pack
         ( PACK_PALLET_FORMAT
-        , $startX, $startX
-        , $startYs->[0], $startYs->[1]
+        , lerp1d
+          ( $startX
+          , $parameters->{juliaParameterX}
+          , $parameters->{simpleJuliaTilt}
+          )
+        , lerp1d
+          ( $startX
+          , $parameters->{juliaParameterX}
+          , $parameters->{simpleJuliaTilt}
+          )
+        , lerp1d
+          ( $startYs->[0]
+          , $parameters->{juliaParameterY}
+          , $parameters->{simpleJuliaTilt}
+          )
+        , lerp1d
+          ( $startYs->[1]
+          , $parameters->{juliaParameterY}
+          , $parameters->{simpleJuliaTilt}
+          )
         , $startX, $startX
         , $startYs->[0], $startYs->[1]
         , 1, 1
@@ -486,7 +546,7 @@ sub drawSetToImage
 
       end("Child reported the following error: $SIMDError")
         unless(length($SIMDError) == 0);
-      
+
       my(@samples) = unpack(PACK_PALLET_CURRENT_ITERATIONS_ONLY, $pallet);
 
       # This is a quick trick to make "maxint" results reset to zero,
@@ -504,7 +564,7 @@ sub drawSetToImage
     printf("\r%4.1f%%", (($imageHeight/2)-$startYindex)/($imageHeight/2)*100);
     # end("row");
   }
-  
+
   $imageInput .= $samplesRowA . $samplesRowB;
   $samplesRowA = $samplesRowB = '';
 
@@ -590,8 +650,26 @@ ENDHEADER
       { $SIMDInput .=
           pack
           ( PACK_PALLET_FORMAT
-          , $startX, $startX
-          , $startYs->[0], $startYs->[1]
+          , lerp1d
+            ( $startX
+            , $parameters->{juliaParameterX}
+            , $parameters->{simpleJuliaTilt}
+            )
+          , lerp1d
+            ( $startX
+            , $parameters->{juliaParameterX}
+            , $parameters->{simpleJuliaTilt}
+            )
+          , lerp1d
+            ( $startYs->[0]
+            , $parameters->{juliaParameterY}
+            , $parameters->{simpleJuliaTilt}
+            )
+          , lerp1d
+            ( $startYs->[1]
+            , $parameters->{juliaParameterY}
+            , $parameters->{simpleJuliaTilt}
+            )
           , $startX, $startX
           , $startYs->[0], $startYs->[1]
           , 1, 1
@@ -628,7 +706,7 @@ ENDHEADER
     { $startXindex = $parameters->{viewPortTextSize}{x};
 
       while($startXindex --> 0)
-      { 
+      {
 # CORE::say STDERR encode_json([when => 'before', childOutputLength => length($SIMDOutput), childInputLength => length($SIMDInput)]);
         $SIMDTimer->start($timeoutInterval);
         eval
@@ -640,7 +718,7 @@ ENDHEADER
 
         end("Child reported the following error: $SIMDError")
           unless(length($SIMDError) == 0);
-        
+
         my(@samples) = unpack(PACK_PALLET_CURRENT_ITERATIONS_ONLY, $pallet);
 
         # This is a quick trick to make "maxint" results reset to zero,
@@ -823,7 +901,7 @@ sub acceptInput
 
 # input:
 # * coordinate to act along: x or y (single character string)
-# * cell coordinate to translate to 
+# * cell coordinate to translate to
 sub cellToPlane
 { my($axis) = shift;
   my($cellCoordinate) = shift;
@@ -840,13 +918,28 @@ sub cellToPlane
     $viewPortSize = $parameters->{viewPortSize}{x}/$aspectRatio;
   }
 
-  my($ret)
-  = $parameters->{viewPortCenter}->{$axis}
-    - $viewPortHalf
-    + $cellCoordinate
-    * ( $viewPortSize / $resolution
-      )
-    ;
+  local $SIG{__WARN__} =
+    sub
+    { die
+      ( "\n\n\n\n\n\n"
+      . Dumper
+        ( { '$parameters->{viewPortCenter}->{$axis}' => $parameters->{viewPortCenter}->{$axis}
+          , '$viewPortHalf' => $viewPortHalf
+          , 'Warning Text' => $_[0]
+          , '$parameters' => $parameters
+          , '$axis' => $axis
+          }
+        )
+      );
+    }; # keep an eye out for a subtraction fault on RESET VIEW
+
+  my($ret) =
+    ( $parameters->{viewPortCenter}->{$axis}
+      - $viewPortHalf
+      + $cellCoordinate
+      * ( $viewPortSize / $resolution
+        )
+    );
 
 # end
 # ( Dumper
@@ -894,3 +987,4 @@ sub resetColors { print $ANSIControlSequenceIntroducer, 'm'; }
 sub topleftScreen { print $ANSIControlSequenceIntroducer, "0;0H"; }
 sub mouseClickTrackingStart { print $ANSIControlSequenceIntroducer, '?9h', $ANSIControlSequenceIntroducer, '?1015h'; }
 sub mouseAllTrackingStop { print $ANSIControlSequenceIntroducer, '?1000l'; }
+sub lerp1d { $_[0]*(1-$_[2]) + $_[1]*$_[2]; }

@@ -1,6 +1,28 @@
 #!/bin/perl -CS
 
 ##### Current Status
+# Guh.. bash mostly peters out on me as soon as I want to do either
+# floating or fixed point arith (such as mapping frames to [0,1]).
+# And I can't clearly think of non-bash options for constantly re-invoking the
+# perl script, nor can I imagine how best to support looping of broader
+# animation support that I want from within the perl script itself.
+# Need time to reflect.
+#############
+# The following has worked, though I need to clean it up a lot for my next attempt.
+# = Gen the images:
+# for simpleJuliaTilt in $(seq 0 0.01 1); do echo $simpleJuliaTilt; ./mandelbrot_ascii.pl '{"juliaParameterX":0, "juliaParameterY":1, "viewPortCenterY":0.33, "viewPortCenterX":-0.25, "viewPortHeight":1.25, "photoMode":"160x90", "simpleJuliaTilt":'$simpleJuliaTilt', "imageName":"test_'$simpleJuliaTilt'.png"}'; done
+# = Rename them to be ffmpeg friendly:
+# ls -1 images/test_?.??.png | perl -pe '$i++; $j = sprintf("%03d", $i); s/^(.*)$/mv $1 images\/test_$j.png/;' | bash
+# = compile into an animation
+# ffmpeg -framerate 10 -i images/test_%03d.png -c:v libvpx-vp9 -pix_fmt yuva420p -lossless 1 images/test.webm
+#############
+# Mostly workable bash loop:
+# for simpleJuliaTilt in $(seq 0.03 0.01 1); do echo $simpleJuliaTilt; ./mandelbrot_ascii.pl '{"juliaParameterX":0, "juliaParameterY":1, "viewPortCenterY":0.33, "viewPortCenterX":-0.25, "viewPortHeight":1.25, "photoMode":"160x90", "simpleJuliaTilt":'$simpleJuliaTilt'}'; done
+# current challenge there: I do need image name or else
+# the auto timestamp-based name only uses one minute resolution
+# and can lead successive frames to overwrite previous ones finished
+# in the same 60 second interval.
+#############
 # Good looking first place to try making a super small resolution animation
 # ./mandelbrot_ascii.pl '{"juliaParameterX":0, "juliaParameterY":1, "viewPortCenterY":0.33, "viewPortCenterX":-0.25, "viewPortHeight":1.25, "simpleJuliaTilt":0.41}'
 # Just need to do a bash loop or something to iterate over altering the "simpleJuliaTilt" from 0 to 1
@@ -112,9 +134,13 @@ use IO::Handle;
 use JSON qw( decode_json encode_json );
 use IPC::Run qw( start pump finish timeout );
 use Time::HiRes qw(sleep);
-die unless STDIN->blocking(0); # Turn off input buffering
+
+# Handle output buffering here, before all routines
+# be they graphic or non-graphic.
+# Input buffering gets mangles only later, after all
+# non-graphic routines have yielded the floor.
 $|++; # Turn off output buffering
-binmode(STDIN);
+
 
 my($pseudographicAlphebetB) = "▀";
 my($ANSIControlSequenceIntroducer) = "\e[";
@@ -137,44 +163,42 @@ my($ACCEPTABLE_LANE_CONFIGS) =
 # Routine to perform terminal cleanup before ending program,
 # Especially in case of an interrupt!
 sub end
-{ mouseAllTrackingStop();
+{ my($errorMessage) = shift;
+  my($arguments) =
+  { graphics => TRUE
+  , @_
+  };
+  mouseAllTrackingStop();
   resetColors();
-  topleftScreen(); # scrolling graphics slows down terminals. :P
+  topleftScreen() if($arguments->{graphics}); # scrolling graphics slows down terminals. :P
   system("stty echo"); # Begin allow echoing input to the screen again
-  CORE::say
-  ( "\n${ANSIControlSequenceIntroducer}2K"
-  , 'Last viewed arguments, suitable for replay:'
-  , $TAB
-  , encode_json
-    ( { viewPortCenterX   => $parameters->{viewPortCenterX}
-      , viewPortCenterY   => $parameters->{viewPortCenterY}
-      , viewPortHeight    => $parameters->{viewPortHeight}
-      , maximumIterations => $parameters->{maximumIterations}
-      , engineThreshold   => $parameters->{engineThreshold}
-      , simpleJuliaTilt   => $parameters->{simpleJuliaTilt}
-      , juliaParameterX   => $parameters->{juliaParameterX}
-      , juliaParameterY   => $parameters->{juliaParameterY}
-      }
-    )
-  # , $TAB, $parameters->{viewPortCenterX}
-  # , $TAB, $parameters->{viewPortCenterY}
-  # , $TAB, $parameters->{viewPortHeight}
-  # , $TAB, $parameters->{maximumIterations}
-  # , $TAB, $parameters->{engineThreshold}
-  );
-  die($_[0]) if(defined($_[0]) && $_[0] ne 'INT');
+
+  if($arguments->{graphics})
+  { CORE::say
+    ( "\n${ANSIControlSequenceIntroducer}2K"
+    , 'Last viewed arguments, suitable for replay:'
+    , $TAB
+    , encode_json
+      ( { viewPortCenterX   => $parameters->{viewPortCenterX}
+        , viewPortCenterY   => $parameters->{viewPortCenterY}
+        , viewPortHeight    => $parameters->{viewPortHeight}
+        , maximumIterations => $parameters->{maximumIterations}
+        , engineThreshold   => $parameters->{engineThreshold}
+        , simpleJuliaTilt   => $parameters->{simpleJuliaTilt}
+        , juliaParameterX   => $parameters->{juliaParameterX}
+        , juliaParameterY   => $parameters->{juliaParameterY}
+        }
+      )
+    # , $TAB, $parameters->{viewPortCenterX}
+    # , $TAB, $parameters->{viewPortCenterY}
+    # , $TAB, $parameters->{viewPortHeight}
+    # , $TAB, $parameters->{maximumIterations}
+    # , $TAB, $parameters->{engineThreshold}
+    );
+  }
+  die($errorMessage) if(defined($errorMessage) && $errorMessage ne 'INT');
   exit 0;
 }
-$SIG{INT} = \&end; # Make sure Ctrl-C flows through cleanup
-$SIG{WINCH} = sub {setParameters();}; # detect screen size change
-
-# Suppress input being displayed on the screen.
-# Currently our goal is to keep it off under
-# all circumstances, except temporarily when
-# typed input may be needed, and otherwise when
-# the script terminates via "end()".
-system("stty -icanon; stty -echo");
-mouseClickTrackingStart();
 
 $SIMDProcess
 = start
@@ -217,11 +241,22 @@ sub setParameters
     , simpleJuliaTilt => 0
     , juliaParameterX => 0
     , juliaParameterY => 0
+    , photoMode => '' # Format: either "matches /^(\d+)x(\d+)$/" or disabled
+    , imageName => '' # Format: either '' for auto or a string
     , %$parameters
     , %$newParameters
     )
   };
 
+  delete $parameters->{imageName}
+    unless(length($parameters->{imageName}));
+
+  end
+  ( ( 'Error: imageName "$parameters->{imageName}" is not allowed to contain'
+    . ' any forward or backward slash characters.'
+    )
+  , graphics => FALSE
+  ) unless($parameters->{imageName} !~ /[\\\/]/);
 
 # die
 # ( Dumper
@@ -267,6 +302,48 @@ sub setParameters
 
 setParameters( $ARGV[0]?%{decode_json($ARGV[0])}:{} );
 
+# width x height, eg "1920x1080"
+if($parameters->{photoMode} =~ /^(\d+)x(\d+)$/)
+{ my($width, $height) = ($1, $2); # input parsing already guarantees nonnegative integers
+
+  if($width*$height<1)
+  { end
+    ( ( "Bad photoMode size, both dimensions must be nonzero:"
+      . " ($parameters->{photoMode})"
+      )
+    , graphics => FALSE
+    );
+  }
+
+  CORE::say "Saving $parameters->{photoMode} image, please wait ...";
+  drawSetToImage
+  ( imageWidth  => $width
+  , imageHeight => $height
+  , fileName    => $parameters->{imageName}
+  );
+  CORE::say '';
+  CORE::say "Image save completed. :D";
+  end(undef, graphics => FALSE);
+}
+
+$SIG{INT} = \&end; # Make sure Ctrl-C flows through cleanup
+$SIG{WINCH} = sub {setParameters();}; # detect screen size change
+
+# Handle input buffering here, only after non-graphic routines have yielded.
+# Output buffering is handled at beginning of script, since
+# non-graphic routines need that too.
+die unless STDIN->blocking(0); # Turn off input buffering
+binmode(STDIN);
+
+# Suppress input being displayed on the screen.
+# Currently our goal is to keep it off under
+# all circumstances, except temporarily when
+# typed input may be needed, and otherwise when
+# the script terminates via "end()".
+system("stty -icanon; stty -echo");
+mouseClickTrackingStart();
+
+
 my($inputCommands) =
 { qr(^(?:\x{4}|\x{1B}$|q)) => 'QUIT'
 , qr(^\+) => 'ZOOM IN'
@@ -283,8 +360,7 @@ my($inputCommands) =
 , qr(^\Q${ANSIControlSequenceIntroducer}\EB) => 'DOWN'
 , qr(^\Q${ANSIControlSequenceIntroducer}\EC) => 'RIGHT'
 , qr(^\Q${ANSIControlSequenceIntroducer}\ED) => 'LEFT'
-, qr(^\Q${ANSIControlSequenceIntroducer}\E(\d+);(\d+);(\d+)M) =>
-    'MOUSE EVENT'
+, qr(^\Q${ANSIControlSequenceIntroducer}\E(\d+);(\d+);(\d+)M) => 'MOUSE EVENT'
 };
 
 my $ANSI_RESPONSE_LEFT_BUTTON = 32;
@@ -399,15 +475,16 @@ while(1)
     topleftScreen();
     CORE::say "Saving image, please wait ...";
     drawSetToImage
-    # ( 3840
-    # , 2160
-    # ( 1920
-    # , 1080
-    # ( 7650 # 17" @ 450dpi
-    # , 4950 # 11" @ 450dpi
-    ( 1920 # Standard HD
-    , 1080 #
+    # ( imageWidth  => 3840
+    # , imageHeight => 2160
+    # ( imageWidth  => 1920
+    # , imageHeight => 1080
+    # ( imageWidth  => 7650 # 17" @ 450dpi
+    # , imageHeight => 4950 # 11" @ 450dpi
+    ( imageWidth  => 1920 # Standard HD
+    , imageHeight => 1080 #
     );
+    CORE::say '';
     CORE::say "Image save completed. :D";
     goto REPEAT_INPUT;
   }
@@ -416,11 +493,12 @@ while(1)
     topleftScreen();
     CORE::say "Saving HUGE image, please wait ...";
     drawSetToImage
-    # ( 30600 # 17" @ 1800dpi
-    # , 19800 # 11" @ 1800dpi
-    ( 7650 # 17" @ 450dpi
-    , 4950 # 11" @ 450dpi
+    # ( imageWidth  => 30600 # 17" @ 1800dpi
+    # , imageHeight => 19800 # 11" @ 1800dpi
+    ( imageWidth  => 7650 # 17" @ 450dpi
+    , imageHeight => 4950 # 11" @ 450dpi
     );
+    CORE::say '';
     CORE::say "Image save completed. :D";
     goto REPEAT_INPUT;
   }
@@ -432,8 +510,12 @@ end(Dumper(\@result));
 }
 
 sub drawSetToImage
-{ my $imageWidth = shift;
-  my $imageHeight = shift;
+{ my $arguments =
+  { fileName => 'image '. sprintISO8601ToMinuteNoColon() .'.png'
+  , @_
+  };
+  my $imageWidth = $arguments->{imageWidth};
+  my $imageHeight = $arguments->{imageHeight};
   my $aspectRatio = $imageWidth / $imageHeight;
   my $imageIgnore;
   my $imageInput = '';
@@ -442,7 +524,7 @@ sub drawSetToImage
   = start
     ( [qw(/usr/bin/pnmtopng -compression 0)]
     , '<', \$imageInput
-    , '>', 'images/image '. sprintISO8601ToMinuteNoColon() .'.png'
+    , '>', 'images/'. $arguments->{fileName}
     , '2>', \$imageIgnore
     );
 

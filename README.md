@@ -5,7 +5,18 @@ This is also the sister/pilot project to https://github.com/HappMacDonald/Master
 What I learn here will help better inform how to continue building out the SIMD-focused assembly compiler for my new coding language.
 
 # Command line arguments:
-./mandelbrot_ascii.pl [X center of view] [Y center of view] [Height of view screen] [Number of maximum iterations]
+./mandelbrot_ascii.pl [quoted JSON containing one or more of the following fields]
+{ "simpleJuliaTilt": 0 renders a Julia set, 1 the M-set, and other values slice between them
+, "juliaParameterX": X-coordinate of Julia parameter (unusued when rendering M-set)
+, "juliaParameterY":
+, "viewPortHeight":
+, "viewPortCenterX":
+, "viewPortCenterY":
+, "maximumIterations":
+, "photoMode": if present takes the form width, the letter 'x', then height in pixels. Will not render anything to screen but will render to an image file at the requested resolution and then exit.
+, "imageName": only valid in photo mode. Defaults to "image_" followed by an ISO-8601-based timestamp.
+}
+
 
 Upon quitting, the application will try to output the settings last viewed to STDOUT, so that one can easily browse back to that location by feeding them back in as CLI arguments.
 
@@ -16,7 +27,7 @@ If you resize your terminal window, it will do its best to redraw to your new si
 * UP, DOWN, LEFT, RIGHT arrow keys: pan view port ~33% of its current height or width in any direction
     (center of screen defaults to -0.5,0)
 
-* + / -:  zoom in or out by 50%
+* \+ / -:  zoom in or out by 50%
     (viewport height defaults to 4 units)
 
 * \[ / ]: Decrease / Increase maximum number of iterations by a factor of 4

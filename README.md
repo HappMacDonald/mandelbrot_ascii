@@ -6,15 +6,25 @@ What I learn here will help better inform how to continue building out the SIMD-
 
 # Command line arguments:
 ./mandelbrot_ascii.pl [quoted JSON containing one or more of the following fields]
+
 { "simpleJuliaTilt": 0 renders a Julia set, 1 the M-set, and other values slice between them
+
 , "juliaParameterX": X-coordinate of Julia parameter (unusued when rendering M-set)
+
 , "juliaParameterY":
+
 , "viewPortHeight":
+
 , "viewPortCenterX":
+
 , "viewPortCenterY":
+
 , "maximumIterations":
+
 , "photoMode": if present takes the form width, the letter 'x', then height in pixels. Will not render anything to screen but will render to an image file at the requested resolution and then exit.
+
 , "imageName": only valid in photo mode. Defaults to "image_" followed by an ISO-8601-based timestamp.
+
 }
 
 
